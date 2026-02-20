@@ -1,7 +1,9 @@
 import asyncio
 from typing import List, Optional
+from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 from loguru import logger
+from playwright_stealth import Stealth
 from app.core.config import settings
 
 class ScraperService:
@@ -88,12 +90,21 @@ class ScraperService:
         """
         context = await self.browser.new_context()
         page = await context.new_page()
+        await Stealth().apply_stealth_async(page)
         links = set()
         links.add(homepage_url)
         
         try:
-            await page.goto(homepage_url, wait_until="domcontentloaded", timeout=15000)
-            keywords = ["contact", "about", "location", "team", "connect"]
+            # wait_until="networkidle" handles Single Page Apps better than domcontentloaded
+            await page.goto(homepage_url, wait_until="networkidle", timeout=20000)
+        except Exception:
+            logger.debug(f"Timeout waiting for networkidle on {homepage_url}, proceeding anyway.")
+            
+        try:
+            # Give it 3 extra seconds just in case of animations/heavy React hydration
+            await asyncio.sleep(3)
+            
+            keywords = ["contact", "about", "location", "team", "connect", "회사소개", "연락처"]
             anchors = page.locator("a[href]")
             count = await anchors.count()
             
@@ -102,7 +113,8 @@ class ScraperService:
                 text = await anchors.nth(i).inner_text()
                 
                 if href:
-                    full_url = href if href.startswith("http") else homepage_url.rstrip("/") + "/" + href.lstrip("/")
+                    # Robust URL completion (handles /about, mailto:, etc.)
+                    full_url = urljoin(homepage_url, href)
                     text_lower = text.lower()
                     href_lower = href.lower()
                     
@@ -119,12 +131,20 @@ class ScraperService:
     async def extract_page_text(self, url: str) -> str:
         """
         Visits a URL and extracts its visible text, truncated to 15k chars.
+        Handles SPAs by waiting for networkidle.
         """
         context = await self.browser.new_context()
         page = await context.new_page()
+        await Stealth().apply_stealth_async(page)
         text = ""
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=20000)
+            except Exception:
+                logger.debug(f"Timeout waiting for networkidle on {url}, proceeding anyway.")
+            
+            await asyncio.sleep(3) # Extra buffer for React/Vue hydration
+            
             body = page.locator("body")
             text = await body.inner_text()
             text = " ".join(text.split())
