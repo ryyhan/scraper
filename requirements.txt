@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+playwright
+groq
+sqlmodel
+aiosqlite
+beautifulsoup4
+httpx
+pydantic
+pydantic-settings
+loguru
