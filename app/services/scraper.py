@@ -1,9 +1,10 @@
 import asyncio
 from typing import List, Optional
 from urllib.parse import urljoin
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Error as PlaywrightError
 from loguru import logger
 from playwright_stealth import Stealth
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.core.config import settings
 
 class ScraperService:
@@ -17,7 +18,7 @@ class ScraperService:
 
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
+        self.browser = await self.playwright.chromium.launch(headless=False)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -84,6 +85,48 @@ class ScraperService:
         logger.info(f"DuckDuckGo Search returned {len(results)} valid URLs.")
         return results
 
+    async def perform_duckduckgo_snippet_search(self, query: str) -> str:
+        """
+        Performs a DuckDuckGo search and extracts the visible text snippets.
+        Used as a fallback to bypass scraping and directly ask the LLM to find emails in search results.
+        """
+        import httpx
+        from bs4 import BeautifulSoup
+        
+        url = "https://html.duckduckgo.com/html/"
+        params = {"q": query}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://html.duckduckgo.com/"
+        }
+        
+        snippets_text = ""
+        try:
+            logger.info(f"Performing DuckDuckGo Snippet Search for: {query}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, data=params, headers=headers, follow_redirects=True, timeout=15)
+                
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                snippets = soup.select(".result__snippet")
+                for s in snippets:
+                    snippets_text += s.get_text(strip=True) + "\n---\n"
+                    
+        except Exception as e:
+            logger.error(f"Error during DuckDuckGo snippet search for '{query}': {e}")
+            
+        return snippets_text
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((PlaywrightError, asyncio.TimeoutError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"Retrying harvest_contact_links. Attempt {retry_state.attempt_number} for {retry_state.args[1]}"
+        )
+    )
     async def harvest_contact_links(self, homepage_url: str) -> List[str]:
         """
         Visits the homepage and extracts links that might contain contact info.
@@ -128,6 +171,14 @@ class ScraperService:
             
         return list(links)
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((PlaywrightError, asyncio.TimeoutError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"Retrying extract_page_text. Attempt {retry_state.attempt_number} for {retry_state.args[1]}"
+        )
+    )
     async def extract_page_text(self, url: str) -> str:
         """
         Visits a URL and extracts its visible text, truncated to 15k chars.

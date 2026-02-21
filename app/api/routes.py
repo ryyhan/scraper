@@ -60,6 +60,15 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
 
                 # 5. Extract Contact Info
                 contact_info = await llm_client.extract_contact_info(combined_text)
+                
+                # 6. Fallback Search for missing email
+                if contact_info and not contact_info.Email:
+                    logger.info(f"Task {task_id}: Primary extraction missed Email. Triggering targeted fallback search.")
+                    fallback_query = f'"{request.poe_name}" contact email address'
+                    snippets_text = await scraper.perform_duckduckgo_snippet_search(fallback_query)
+                    if snippets_text:
+                        contact_info = await llm_client.extract_fallback_email(snippets_text, contact_info)
+                
                 if contact_info:
                     final_result.poe_info = contact_info
                     status = "SUCCESS"
