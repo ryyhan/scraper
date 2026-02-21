@@ -32,7 +32,7 @@ class LLMService:
                     {"role": "system", "content": "You are a helpful assistant that identifies official company websites."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 temperature=0,
             )
             result = chat_completion.choices[0].message.content.strip()
