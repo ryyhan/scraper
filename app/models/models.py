@@ -1,7 +1,8 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
 from sqlmodel import SQLModel, Field, JSON
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+import re
 
 # --- API Request Model ---
 class SearchRequest(BaseModel):
@@ -14,6 +15,17 @@ class ContactInfo(BaseModel):
     Email: str
     Address: str
     DeptContacts: Optional[Dict[str, Any]] = None
+
+    @field_validator('Email', mode='before')
+    @classmethod
+    def validate_email(cls, v: Any) -> str:
+        if not v or not isinstance(v, str):
+            return ""
+        v = v.strip()
+        # Basic email regex pattern
+        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", v):
+            return ""
+        return v
 
 class ScrapeResult(BaseModel):
     poe_name: str
