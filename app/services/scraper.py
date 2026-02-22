@@ -119,6 +119,81 @@ class ScraperService:
             
         return snippets_text
 
+    async def perform_serper_search(self, query: str) -> List[str]:
+        """
+        Performs a Google search using the Serper.dev API.
+        Returns a list of direct URLs.
+        """
+        import httpx
+        import json
+        
+        if not settings.SERPER_API_KEY:
+            logger.error("SERPER_API_KEY is missing, falling back to DuckDuckGo")
+            return await self.perform_duckduckgo_search(query)
+            
+        url = "https://google.serper.dev/search"
+        payload = json.dumps({"q": query, "gl": "us", "hl": "en", "num": 5})
+        headers = {
+            'X-API-KEY': settings.SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        results = []
+        try:
+            logger.info(f"Performing Serper Search for: {query}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, data=payload, timeout=15)
+                
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get("organic", []):
+                    if "link" in item:
+                        results.append(item["link"])
+            else:
+                logger.error(f"Serper API failed with status {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Error during Serper search for '{query}': {e}")
+            
+        return results
+
+    async def perform_serper_snippet_search(self, query: str) -> str:
+        """
+        Performs a Google search using Serper and extracts the snippets.
+        Used as a fallback to bypass scraping and directly ask the LLM to find emails.
+        """
+        import httpx
+        import json
+        
+        if not settings.SERPER_API_KEY:
+            return await self.perform_duckduckgo_snippet_search(query)
+            
+        url = "https://google.serper.dev/search"
+        payload = json.dumps({"q": query, "gl": "us", "hl": "en", "num": 10})
+        headers = {
+            'X-API-KEY': settings.SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        snippets_text = ""
+        try:
+            logger.info(f"Performing Serper Snippet Search for: {query}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, data=payload, timeout=15)
+                
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get("organic", []):
+                    if "snippet" in item:
+                        snippets_text += item["snippet"] + "\n---\n"
+            else:
+                logger.error(f"Serper API failed with status {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Error during Serper snippet search for '{query}': {e}")
+            
+        return snippets_text
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),

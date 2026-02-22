@@ -14,6 +14,9 @@ class ContactInfo(BaseModel):
     Phone: str
     Email: str
     Address: str
+    City: str = ""
+    State: str = ""
+    ZipCode: str = ""
     DeptContacts: Optional[Dict[str, Any]] = None
 
     @field_validator('Email', mode='before')
@@ -42,6 +45,7 @@ class WebhookPayload(BaseModel):
 class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)
     status: str = Field(default="PENDING")  # PENDING, IN_PROGRESS, SUCCESS, FAILURE
+    message: Optional[str] = Field(default=None)
     result_data: Optional[Dict[str, Any]] = Field(default=None, sa_type=JSON)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

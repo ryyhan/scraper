@@ -31,8 +31,12 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
 
         try:
             async with scraper:
-                # 1. Search (DuckDuckGo now)
-                search_results = await scraper.perform_duckduckgo_search(f"{request.poe_name}")
+                # 1. Search (Dynamic Provider)
+                if settings.SEARCH_PROVIDER.lower() == "serper":
+                    search_results = await scraper.perform_serper_search(request.poe_name)
+                else:
+                    search_results = await scraper.perform_duckduckgo_search(request.poe_name)
+                    
                 if not search_results:
                     message = "No search results found"
                     raise ValueError(message)
@@ -65,7 +69,12 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 if contact_info and not contact_info.Email:
                     logger.info(f"Task {task_id}: Primary extraction missed Email. Triggering targeted fallback search.")
                     fallback_query = f'"{request.poe_name}" contact email address'
-                    snippets_text = await scraper.perform_duckduckgo_snippet_search(fallback_query)
+                    
+                    if settings.SEARCH_PROVIDER.lower() == "serper":
+                        snippets_text = await scraper.perform_serper_snippet_search(fallback_query)
+                    else:
+                        snippets_text = await scraper.perform_duckduckgo_snippet_search(fallback_query)
+                        
                     if snippets_text:
                         contact_info = await llm_client.extract_fallback_email(snippets_text, contact_info)
                 
@@ -88,6 +97,7 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
             task = session.get(TaskRecord, task_id)
             if task:
                 task.status = status
+                task.message = message
                 task.result_data = final_result.model_dump()
                 task.updated_at = datetime.utcnow()
                 session.add(task)
@@ -127,6 +137,7 @@ async def get_task_status(task_id: str, session: Session = Depends(get_session))
     return {
         "task_id": task.task_id,
         "status": task.status,
+        "message": task.message,
         "result": task.result_data,
         "created_at": task.created_at,
         "updated_at": task.updated_at

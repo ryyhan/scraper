@@ -76,7 +76,10 @@ class LLMService:
         Return a valid JSON object with the following keys:
         - "Phone": The phone number (string)
         - "Email": The email address (string)
-        - "Address": The full physical address (string)
+        - "Address": The full physical street address (string)
+        - "City": The city (string)
+        - "State": The state or region (string)
+        - "ZipCode": The postal or zip code (string)
         - "DeptContacts": A dictionary of specific department contacts if available (e.g. {{"Sales": "123-456"}})
 
         If a field is not found, use an empty string or null.
@@ -101,6 +104,9 @@ class LLMService:
                 Phone=str(data.get("Phone", "") or ""),
                 Email=str(data.get("Email", "") or ""),
                 Address=str(data.get("Address", "") or ""),
+                City=str(data.get("City", "") or ""),
+                State=str(data.get("State", "") or ""),
+                ZipCode=str(data.get("ZipCode", "") or ""),
                 DeptContacts=data.get("DeptContacts", {})
             )
             

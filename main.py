@@ -5,6 +5,10 @@ from fastapi import FastAPI
 from sqlmodel import SQLModel
 from loguru import logger
 
+# Configure Loguru to write to a local file, rotating when it reaches 10MB
+# and keeping the last 7 days of logs.
+logger.add("scraper.log", rotation="100 MB", retention="30 days", level="INFO")
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
