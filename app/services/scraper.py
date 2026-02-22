@@ -237,7 +237,9 @@ class ScraperService:
                     href_lower = href.lower()
                     
                     if any(k in text_lower or k in href_lower for k in keywords):
-                        links.add(full_url)
+                        # Ensure we don't try to visit mailto: or tel: links as web pages
+                        if full_url.startswith("http"):
+                            links.add(full_url)
                         
         except Exception as e:
             logger.error(f"Error harvesting links from {homepage_url}: {e}")
