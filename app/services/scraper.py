@@ -273,8 +273,16 @@ class ScraperService:
             
             await asyncio.sleep(3) # Extra buffer for React/Vue hydration
             
-            body = page.locator("body")
-            text = await body.inner_text()
+            try:
+                body = page.locator("body")
+                # Wait up to 5 seconds for the body to be present
+                await body.wait_for(state="attached", timeout=5000)
+                text = await body.inner_text()
+            except Exception:
+                logger.warning(f"Could not locate <body> on {url}, falling back to full page extraction.")
+                # Fallback for sites using <frameset> or heavily broken HTML
+                text = await page.evaluate("document.documentElement.innerText") or ""
+                
             text = " ".join(text.split())
         except Exception as e:
             logger.error(f"Error extracting text from {url}: {e}")
