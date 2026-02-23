@@ -32,10 +32,11 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
         try:
             async with scraper:
                 # 1. Search (Dynamic Provider)
+                smart_query = f"{request.poe_name} official site contact"
                 if settings.SEARCH_PROVIDER.lower() == "serper":
-                    search_results = await scraper.perform_serper_search(request.poe_name)
+                    search_results = await scraper.perform_serper_search(smart_query)
                 else:
-                    search_results = await scraper.perform_duckduckgo_search(request.poe_name)
+                    search_results = await scraper.perform_duckduckgo_search(smart_query)
                     
                 if not search_results:
                     message = "No search results found"
@@ -68,7 +69,7 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 # 6. Fallback Search for missing email
                 if contact_info and not contact_info.Email:
                     logger.info(f"Task {task_id}: Primary extraction missed Email. Triggering targeted fallback search.")
-                    fallback_query = f'"{request.poe_name}" contact email address'
+                    fallback_query = f'"{request.poe_name}" (email OR "contact us at" OR "reach us at" OR "@")'
                     
                     if settings.SEARCH_PROVIDER.lower() == "serper":
                         snippets_text = await scraper.perform_serper_snippet_search(fallback_query)

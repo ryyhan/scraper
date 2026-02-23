@@ -274,6 +274,13 @@ class ScraperService:
             await asyncio.sleep(3) # Extra buffer for React/Vue hydration
             
             try:
+                # 1. Force Auto-Scroll to trigger lazy-loaded footers where emails often live
+                await page.evaluate("""
+                    window.scrollTo(0, document.body.scrollHeight);
+                    setTimeout(() => window.scrollTo(0, 0), 500);
+                """)
+                await asyncio.sleep(1.5) # Wait for lazy elements to render
+                
                 body = page.locator("body")
                 # Wait up to 5 seconds for the body to be present
                 await body.wait_for(state="attached", timeout=5000)
@@ -282,6 +289,26 @@ class ScraperService:
                 logger.warning(f"Could not locate <body> on {url}, falling back to full page extraction.")
                 # Fallback for sites using <frameset> or heavily broken HTML
                 text = await page.evaluate("document.documentElement.innerText") or ""
+                
+            # 2. Raw HTML Regex Parsing for Hidden Emails
+            import re
+            html_content = await page.content() or ""
+            
+            # Aggressively hunt for mailto: links in the raw HTML source
+            mailto_matches = re.findall(r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', html_content, re.IGNORECASE)
+            
+            # Also look for any standard email pattern in the raw source (can be noisy, so we filter it)
+            raw_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html_content)
+            
+            found_emails = set(mailto_matches + raw_emails)
+            # Filter out common false-positives (images masquerading as emails, sentry trackers, fake placeholders)
+            invalid_domains = ['.png', '.jpg', '.jpeg', '.gif', '.css', '.js', 'sentry', 'example', 'domain.com', '.webp', 'wixpress']
+            valid_emails = [e for e in found_emails if not any(bad in e.lower() for bad in invalid_domains)]
+            
+            if valid_emails:
+                logger.info(f"Regex found {len(valid_emails)} hidden emails in raw HTML on {url}")
+                # Append them forcefully to the bottom of the visible text so the LLM is guaranteed to see them
+                text += "\n\n--- HIDDEN EMAILS FOUND IN RAW HTML SOURCE ---\n" + "\n".join(valid_emails)
                 
             text = " ".join(text.split())
         except Exception as e:
