@@ -42,10 +42,13 @@ class ContactInfo(BaseModel):
         if not v or not isinstance(v, str):
             return ""
         v = v.strip()
-        # Basic email regex pattern
-        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", v):
-            return ""
-        return v
+        
+        # Extract the FIRST valid email address from the string using regex
+        match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", v)
+        if match:
+            return match.group(0).lower()
+            
+        return ""
 
 class ScrapeResult(BaseModel):
     poe_name: str
