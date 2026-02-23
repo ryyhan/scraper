@@ -75,6 +75,7 @@ class LLMService:
         
         Return a valid JSON object with the following keys:
         - "Phone": The phone number (string)
+        - "Fax": The fax number (string)
         - "Email": The email address (string)
         - "Address": The full physical street address (string)
         - "City": The city (string)
@@ -102,6 +103,7 @@ class LLMService:
             
             return ContactInfo(
                 Phone=str(data.get("Phone", "") or ""),
+                Fax=str(data.get("Fax", "") or ""),
                 Email=str(data.get("Email", "") or ""),
                 Address=str(data.get("Address", "") or ""),
                 City=str(data.get("City", "") or ""),
@@ -157,8 +159,9 @@ class LLMService:
             
             found_email = str(data.get("Email", "") or "").strip()
             if found_email:
-                logger.info(f"Fallback search found missing email: {found_email}")
                 current_info.Email = found_email
+                if current_info.Email:
+                    logger.info(f"Fallback search found missing email: {current_info.Email}")
                 
             return current_info
             

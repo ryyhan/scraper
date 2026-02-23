@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
 from sqlmodel import SQLModel, Field, JSON
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, ConfigDict
 import re
 
 # --- API Request Model ---
@@ -11,7 +11,10 @@ class SearchRequest(BaseModel):
 
 # --- LLM / Result Models ---
 class ContactInfo(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+    
     Phone: str
+    Fax: str = ""
     Email: str
     Address: str
     City: str = ""
@@ -19,7 +22,7 @@ class ContactInfo(BaseModel):
     ZipCode: str = ""
     DeptContacts: Optional[Dict[str, Any]] = None
 
-    @field_validator('Phone', mode='before')
+    @field_validator('Phone', 'Fax', mode='before')
     @classmethod
     def validate_phone(cls, v: Any) -> str:
         if not v or not isinstance(v, str):
