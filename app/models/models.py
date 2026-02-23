@@ -19,6 +19,23 @@ class ContactInfo(BaseModel):
     ZipCode: str = ""
     DeptContacts: Optional[Dict[str, Any]] = None
 
+    @field_validator('Phone', mode='before')
+    @classmethod
+    def validate_phone(cls, v: Any) -> str:
+        if not v or not isinstance(v, str):
+            return ""
+        v = v.strip()
+        
+        # Strip all formatting characters to see if we have actual digits left
+        digits_only = re.sub(r"[^0-9]", "", v)
+        
+        # Most North American / International numbers range between 6 and 18 digits
+        if len(digits_only) < 6 or len(digits_only) > 18:
+            return ""
+            
+        # Return the original formatted string if it passed the length check
+        return v
+
     @field_validator('Email', mode='before')
     @classmethod
     def validate_email(cls, v: Any) -> str:
