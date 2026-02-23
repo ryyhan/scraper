@@ -246,7 +246,18 @@ class ScraperService:
         finally:
             await context.close()
             
-        return list(links)
+        # Prioritize Links before returning
+        def score_link(url: str) -> int:
+            url_lower = url.lower()
+            if "contact" in url_lower: return 1
+            if "about" in url_lower: return 2
+            if "team" in url_lower or "staff" in url_lower: return 3
+            if "location" in url_lower or "office" in url_lower: return 4
+            if url_lower == homepage_url.lower(): return 5
+            return 6
+            
+        sorted_links = sorted(list(links), key=score_link)
+        return sorted_links
 
     @retry(
         stop=stop_after_attempt(3),

@@ -56,7 +56,7 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
 
                 # 4. Visit pages
                 combined_text = ""
-                for link in links_to_visit[:3]:
+                for link in links_to_visit[:5]:
                     text = await scraper.extract_page_text(link)
                     combined_text += f"\n--- Source: {link} ---\n{text}\n"
 
