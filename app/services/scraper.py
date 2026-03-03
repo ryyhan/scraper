@@ -76,7 +76,7 @@ class ScraperService:
                         if "duckduckgo.com" not in raw_href:
                             results.append(raw_href)
                         
-                if len(results) >= 5:
+                if len(results) >= 4:
                     break
                     
         except Exception as e:
@@ -132,7 +132,7 @@ class ScraperService:
             return await self.perform_duckduckgo_search(query)
             
         url = "https://google.serper.dev/search"
-        payload = json.dumps({"q": query, "gl": "us", "hl": "en", "num": 5})
+        payload = json.dumps({"q": query, "gl": "us", "hl": "en", "num": 4})
         headers = {
             'X-API-KEY': settings.SERPER_API_KEY,
             'Content-Type': 'application/json'
