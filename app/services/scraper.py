@@ -209,6 +209,15 @@ class ScraperService:
         context = await self.browser.new_context()
         page = await context.new_page()
         await Stealth().apply_stealth_async(page)
+        
+        # Block heavy resources to speed up page loading
+        await page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ["image", "media", "font"]
+            else route.continue_()
+        )
+        
         links = set()
         links.add(homepage_url)
         
@@ -275,6 +284,15 @@ class ScraperService:
         context = await self.browser.new_context()
         page = await context.new_page()
         await Stealth().apply_stealth_async(page)
+        
+        # Block heavy resources to speed up page loading
+        await page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ["image", "media", "font"]
+            else route.continue_()
+        )
+        
         text = ""
         try:
             try:
