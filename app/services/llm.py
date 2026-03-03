@@ -95,7 +95,10 @@ class LLMService:
                 ],
                 model="llama-3.1-8b-instant",
                 temperature=0,
-                response_format={"type": "json_object"}
+                response_format={
+                    "type": "json_schema", 
+                    "json_schema": {"name": "contact_info", "schema": ContactInfo.model_json_schema()}
+                }
             )
             
             content = chat_completion.choices[0].message.content
@@ -144,6 +147,10 @@ class LLMService:
         """
 
         try:
+            from pydantic import BaseModel
+            class FallbackEmail(BaseModel):
+                Email: str
+
             chat_completion = await self.client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": "You extract email addresses from text. Output valid JSON only."},
@@ -151,7 +158,10 @@ class LLMService:
                 ],
                 model="llama-3.1-8b-instant",
                 temperature=0,
-                response_format={"type": "json_object"}
+                response_format={
+                    "type": "json_schema", 
+                    "json_schema": {"name": "fallback_email", "schema": FallbackEmail.model_json_schema()}
+                }
             )
             
             content = chat_completion.choices[0].message.content
