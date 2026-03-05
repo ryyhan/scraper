@@ -95,10 +95,7 @@ class LLMService:
                 ],
                 model="llama-3.1-8b-instant",
                 temperature=0,
-                response_format={
-                    "type": "json_schema", 
-                    "json_schema": {"name": "contact_info", "schema": ContactInfo.model_json_schema()}
-                }
+                response_format={"type": "json_object"}
             )
             
             content = chat_completion.choices[0].message.content
@@ -158,10 +155,7 @@ class LLMService:
                 ],
                 model="llama-3.1-8b-instant",
                 temperature=0,
-                response_format={
-                    "type": "json_schema", 
-                    "json_schema": {"name": "fallback_email", "schema": FallbackEmail.model_json_schema()}
-                }
+                response_format={"type": "json_object"}
             )
             
             content = chat_completion.choices[0].message.content
