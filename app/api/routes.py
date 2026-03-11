@@ -3,7 +3,7 @@ import uuid
 from loguru import logger
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
-from sqlmodel import Session
+from sqlmodel import Session, select, desc
 
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.api.deps import get_session
@@ -159,6 +159,26 @@ async def create_search_task(request: SearchRequest, background_tasks: Backgroun
     background_tasks.add_task(process_scraping_task, task_id, request, webhook_url)
     
     return {"task_id": task_id, "status": "IN_PROGRESS"}
+
+@router.get("/google-search/failed/")
+async def get_failed_tasks(limit: int = 10, session: Session = Depends(get_session)):
+    statement = select(TaskRecord).where(TaskRecord.status == "FAILURE").order_by(desc(TaskRecord.updated_at)).limit(limit)
+    tasks = session.exec(statement).all()
+    
+    results = []
+    for t in tasks:
+        poe_name = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            poe_name = t.result_data.get("poe_name", "Unknown")
+            
+        results.append({
+            "task_id": t.task_id,
+            "poe_name": poe_name,
+            "message": t.message,
+            "failed_at": t.updated_at
+        })
+        
+    return {"failed_tasks": results}
 
 @router.get("/google-search/{task_id}")
 async def get_task_status(task_id: str, session: Session = Depends(get_session)):
