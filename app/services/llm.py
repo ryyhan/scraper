@@ -140,7 +140,10 @@ class LLMService:
         {snippets_text}
         
         If you see an official-looking email address in these snippets, please return it.
-        Return a valid JSON object with a single key "Email". If you cannot find one, return an empty string for the value.
+        Return a valid JSON object with EXACTLY ONE key named "Email". The value must be a single string.
+        Ignore "[email protected]" or obfuscated Cloudflare text.
+        If you find multiple valid emails, return only the absolute best one.
+        If you cannot find one, return an empty string for the value.
         """
 
         try:

@@ -232,12 +232,19 @@ class ScraperService:
             await asyncio.sleep(3)
             
             keywords = ["contact", "about", "location", "team", "connect", "회사소개", "연락처"]
-            anchors = page.locator("a[href]")
-            count = await anchors.count()
             
-            for i in range(count):
-                href = await anchors.nth(i).get_attribute("href")
-                text = await anchors.nth(i).inner_text()
+            # Using browser-side evaluation is much faster and bypasses "Node is not an HTMLElement" exceptions
+            links_data = await page.evaluate('''() => {
+                const anchors = Array.from(document.querySelectorAll("a[href]"));
+                return anchors.map(a => ({
+                    href: a.getAttribute("href") || "",
+                    text: a.innerText || a.textContent || ""
+                }));
+            }''')
+            
+            for item in links_data:
+                href = item.get("href", "")
+                text = item.get("text", "")
                 
                 if href:
                     # Robust URL completion (handles /about, mailto:, etc.)
