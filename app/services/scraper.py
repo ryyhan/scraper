@@ -234,24 +234,23 @@ class ScraperService:
             keywords = ["contact", "about", "location", "team", "connect", "회사소개", "연락처"]
             
             # Using browser-side evaluation is much faster and bypasses "Node is not an HTMLElement" exceptions
-            try:
-                links_data = await page.evaluate('''() => {
-                    const anchors = Array.from(document.querySelectorAll("a[href]"));
-                    return anchors.map(a => ({
-                        href: a.getAttribute("href") || "",
-                        text: a.innerText || a.textContent || ""
-                    }));
-                }''')
-            except Exception as e:
-                logger.warning(f"Initial evaluate failed (likely a client-side redirect): {e}. Waiting and retrying...")
-                await asyncio.sleep(3)
-                links_data = await page.evaluate('''() => {
-                    const anchors = Array.from(document.querySelectorAll("a[href]"));
-                    return anchors.map(a => ({
-                        href: a.getAttribute("href") || "",
-                        text: a.innerText || a.textContent || ""
-                    }));
-                }''')
+            links_data = []
+            for attempt in range(3):
+                try:
+                    links_data = await page.evaluate('''() => {
+                        const anchors = Array.from(document.querySelectorAll("a[href]"));
+                        return anchors.map(a => ({
+                            href: a.getAttribute("href") || "",
+                            text: a.innerText || a.textContent || ""
+                        }));
+                    }''')
+                    break  # Evaluation succeeded
+                except Exception as e:
+                    if "Execution context was destroyed" in str(e) and attempt < 2:
+                        logger.warning(f"Context destroyed natively (redirecting). Retrying {attempt+1}/3 after 3s...")
+                        await asyncio.sleep(3)
+                    else:
+                        raise e # Re-raise if we are out of attempts or it is a different error
             
             for item in links_data:
                 href = item.get("href", "")
