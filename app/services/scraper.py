@@ -234,13 +234,24 @@ class ScraperService:
             keywords = ["contact", "about", "location", "team", "connect", "회사소개", "연락처"]
             
             # Using browser-side evaluation is much faster and bypasses "Node is not an HTMLElement" exceptions
-            links_data = await page.evaluate('''() => {
-                const anchors = Array.from(document.querySelectorAll("a[href]"));
-                return anchors.map(a => ({
-                    href: a.getAttribute("href") || "",
-                    text: a.innerText || a.textContent || ""
-                }));
-            }''')
+            try:
+                links_data = await page.evaluate('''() => {
+                    const anchors = Array.from(document.querySelectorAll("a[href]"));
+                    return anchors.map(a => ({
+                        href: a.getAttribute("href") || "",
+                        text: a.innerText || a.textContent || ""
+                    }));
+                }''')
+            except Exception as e:
+                logger.warning(f"Initial evaluate failed (likely a client-side redirect): {e}. Waiting and retrying...")
+                await asyncio.sleep(3)
+                links_data = await page.evaluate('''() => {
+                    const anchors = Array.from(document.querySelectorAll("a[href]"));
+                    return anchors.map(a => ({
+                        href: a.getAttribute("href") || "",
+                        text: a.innerText || a.textContent || ""
+                    }));
+                }''')
             
             for item in links_data:
                 href = item.get("href", "")
