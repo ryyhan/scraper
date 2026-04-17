@@ -58,7 +58,7 @@ class OpenAISearchService:
             "1. Prioritize Human Resources (HR) contact info.\n"
             "2. If HR is unavailable, find General/Corporate info.\n"
             "3. Look for a Fax number.\n"
-            "4. Find as much as possible so the next step can choose the best single option."
+            "4. Find ALL available contact details (phones, emails, faxes, addresses)."
         )
 
         research_response = self._client.responses.create(
@@ -74,10 +74,11 @@ class OpenAISearchService:
             f"Based on this research:\n{raw_research}\n\n"
             "TASK: Extract the info into JSON.\n"
             "STRICT RULES:\n"
-            "1. Pick ONLY ONE (the best/most relevant) value for each field.\n"
-            "2. If multiple emails/phones exist, prioritize HR, then pick only the primary one.\n"
-            "3. Do NOT use commas, slashes, or lists to include multiple contacts.\n"
-            f"4. Schema: {model_class.model_json_schema()}"
+            "1. Extract ALL valid emails, phone numbers, fax numbers, and physical addresses you can find into arrays.\n"
+            "2. For addresses, format each distinct location into a single fully readable string (e.g., '123 Main St, City, State 12345').\n"
+            f"3. The response MUST be a VALID JSON object matching exactly this schema:\n{json.dumps(model_class.model_json_schema(), indent=2)}\n"
+            f"4. IMPORTANT: DO NOT return the schema definition itself. Return the ACTUAL extracted data values.\n"
+            f"5. Make sure to fill in the 'company_name' key with the target company: {company_query}."
         )
 
         final_response = self._client.responses.create(

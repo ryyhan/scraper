@@ -74,16 +74,13 @@ class LLMService:
         {page_text}
         
         Return a valid JSON object with the following keys:
-        - "Phone": The phone number (string)
-        - "Fax": The fax number (string)
-        - "Email": The email address (string)
-        - "Address": The full physical street address (string)
-        - "City": The city (string)
-        - "State": The state or region (string)
-        - "ZipCode": The postal or zip code (string)
+        - "Phone": Array of phone numbers (list of strings)
+        - "Fax": Array of fax numbers (list of strings)
+        - "Email": Array of email addresses (list of strings)
+        - "Address": Array of full physical street addresses (list of strings, e.g., ["123 Main St, City, State 12345"])
         - "DeptContacts": A dictionary of specific department contacts if available (e.g. {{"Sales": "123-456"}})
 
-        If a field is not found, use an empty string or null.
+        If a field is not found, use an empty array or null (or empty object for DeptContacts).
         Ensure the output is strictly valid JSON.
         """
 
@@ -102,13 +99,10 @@ class LLMService:
             data = json.loads(chat_completion.choices[0].message.content)
             
             return ContactInfo(
-                Phone=str(data.get("Phone", "") or ""),
-                Fax=str(data.get("Fax", "") or ""),
-                Email=str(data.get("Email", "") or ""),
-                Address=str(data.get("Address", "") or ""),
-                City=str(data.get("City", "") or ""),
-                State=str(data.get("State", "") or ""),
-                ZipCode=str(data.get("ZipCode", "") or ""),
+                Phone=data.get("Phone", []),
+                Fax=data.get("Fax", []),
+                Email=data.get("Email", []),
+                Address=data.get("Address", []),
                 DeptContacts=data.get("DeptContacts", {})
             )
             
@@ -139,11 +133,10 @@ class LLMService:
         
         {snippets_text}
         
-        If you see an official-looking email address in these snippets, please return it.
-        Return a valid JSON object with EXACTLY ONE key named "Email". The value must be a single string.
+        If you see official-looking email addresses in these snippets, please return them.
+        Return a valid JSON object with EXACTLY ONE key named "Email". The value must be an array of strings (e.g., ["email1@example.com", "email2@example.com"]).
         Ignore "[email protected]" or obfuscated Cloudflare text.
-        If you find multiple valid emails, return only the absolute best one.
-        If you cannot find one, return an empty string for the value.
+        If you cannot find any, return an empty array.
         """
 
         try:
@@ -160,11 +153,15 @@ class LLMService:
             
             data = json.loads(chat_completion.choices[0].message.content)
             
-            found_email = str(data.get("Email", "") or "").strip()
-            if found_email:
-                current_info.Email = found_email
-                if current_info.Email:
-                    logger.info(f"Fallback search found missing email: {current_info.Email}")
+            found_emails = data.get("Email", [])
+            if isinstance(found_emails, str):
+                found_emails = [found_emails]
+            elif not isinstance(found_emails, list):
+                found_emails = []
+                
+            if found_emails:
+                current_info.Email.extend([e for e in found_emails if isinstance(e, str) and e.strip()])
+                logger.info(f"Fallback search found missing email(s): {found_emails}")
                 
             return current_info
             

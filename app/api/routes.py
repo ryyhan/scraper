@@ -3,7 +3,7 @@ import uuid
 from loguru import logger
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
-from sqlmodel import Session, select, desc
+from sqlmodel import Session, select, desc, String
 
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInfo
@@ -110,13 +110,10 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                     if valid_emails:
                         logger.info(f"Task {task_id}: Extracted valid email from partial text post-timeout.")
                         final_result.poe_info = ContactInfo(
-                            Phone="",
-                            Fax="",
-                            Email=valid_emails[0],
-                            Address="",
-                            City="",
-                            State="",
-                            ZipCode=""
+                            Phone=[],
+                            Fax=[],
+                            Email=valid_emails,
+                            Address=[]
                         )
                 
         except Exception as e:
@@ -287,7 +284,7 @@ async def get_failed_openai_tasks(
     statement = (
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
-        .where(TaskRecord.message.contains("OpenAI") | TaskRecord.result_data.cast(str).contains("company_name"))  # type: ignore[union-attr]
+        .where(TaskRecord.message.contains("OpenAI") | TaskRecord.result_data.cast(String).contains("company_name"))  # type: ignore[union-attr]
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
     )

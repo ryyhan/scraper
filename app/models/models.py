@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from sqlmodel import SQLModel, Field, JSON
 from pydantic import BaseModel, field_validator, ConfigDict
@@ -13,45 +13,52 @@ class SearchRequest(BaseModel):
 class ContactInfo(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
     
-    Phone: str
-    Fax: str = ""
-    Email: str
-    Address: str
-    City: str = ""
-    State: str = ""
-    ZipCode: str = ""
+    Phone: List[str] = Field(default_factory=list)
+    Fax: List[str] = Field(default_factory=list)
+    Email: List[str] = Field(default_factory=list)
+    Address: List[str] = Field(default_factory=list)
     DeptContacts: Optional[Dict[str, Any]] = None
 
     @field_validator('Phone', 'Fax', mode='before')
     @classmethod
-    def validate_phone(cls, v: Any) -> str:
-        if not v or not isinstance(v, str):
-            return ""
-        v = v.strip()
-        
-        # Strip all formatting characters to see if we have actual digits left
-        digits_only = re.sub(r"[^0-9]", "", v)
-        
-        # Most North American / International numbers range between 6 and 18 digits
-        if len(digits_only) < 6 or len(digits_only) > 18:
-            return ""
+    def validate_phone(cls, v: Any) -> List[str]:
+        if not v:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        elif not isinstance(v, list):
+            return []
             
-        # Return the original formatted string if it passed the length check
-        return v
+        valid_numbers = []
+        for item in v:
+            if not item or not isinstance(item, str):
+                continue
+            item = item.strip()
+            digits_only = re.sub(r"[^0-9]", "", item)
+            if 6 <= len(digits_only) <= 18:
+                valid_numbers.append(item)
+        return list(dict.fromkeys(valid_numbers))  # Remove duplicates
 
     @field_validator('Email', mode='before')
     @classmethod
-    def validate_email(cls, v: Any) -> str:
-        if not v or not isinstance(v, str):
-            return ""
-        v = v.strip()
-        
-        # Extract the FIRST valid email address from the string using regex
-        match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", v)
-        if match:
-            return match.group(0).lower()
+    def validate_email(cls, v: Any) -> List[str]:
+        if not v:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        elif not isinstance(v, list):
+            return []
             
-        return ""
+        valid_emails = []
+        for item in v:
+            if not item or not isinstance(item, str):
+                continue
+            item = item.strip()
+            match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", item)
+            if match:
+                valid_emails.append(match.group(0).lower())
+                
+        return list(dict.fromkeys(valid_emails))  # Remove duplicates
 
 class ScrapeResult(BaseModel):
     poe_name: str
@@ -68,10 +75,10 @@ class OpenAISearchRequest(BaseModel):
 
 class OpenAICompanyInfo(BaseModel):
     """Structured company contact extracted by the OpenAI two-step pipeline."""
-    phone: str = ""
-    fax: str = ""
-    email: str = ""
-    address: str = ""
+    phone: List[str] = Field(default_factory=list)
+    fax: List[str] = Field(default_factory=list)
+    email: List[str] = Field(default_factory=list)
+    address: List[str] = Field(default_factory=list)
 
 
 class OpenAISearchResult(BaseModel):
