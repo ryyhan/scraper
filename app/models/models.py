@@ -57,7 +57,30 @@ class ScrapeResult(BaseModel):
     poe_name: str
     official_site: str
     poe_info: Optional[ContactInfo] = None
-    
+
+
+# --- OpenAI Search Models ---
+
+class OpenAISearchRequest(BaseModel):
+    """Request body for the POST /openai-search/ endpoint."""
+    company_name: str  # e.g. "DEMOULAS MARKET BASKET"
+
+
+class OpenAICompanyInfo(BaseModel):
+    """Structured company contact extracted by the OpenAI two-step pipeline."""
+    phone: str = ""
+    fax: str = ""
+    email: str = ""
+    address: str = ""
+
+
+class OpenAISearchResult(BaseModel):
+    """Full response envelope returned by the /openai-search/ endpoint."""
+    company_name: str
+    official_site: str = ""
+    company_info: OpenAICompanyInfo = OpenAICompanyInfo()
+
+
 # --- External Webhook Payload Model ---
 class WebhookPayload(BaseModel):
     status: str

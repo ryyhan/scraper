@@ -2,6 +2,7 @@ fastapi
 uvicorn
 playwright
 groq
+openai
 sqlmodel
 aiosqlite
 beautifulsoup4
