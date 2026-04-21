@@ -92,6 +92,31 @@ class OpenAISearchResult(BaseModel):
     company_info: OpenAICompanyInfo = OpenAICompanyInfo()
 
 
+# --- Gemini Search Models ---
+
+class GeminiSearchRequest(BaseModel):
+    """Request body for the POST /gemini-search/ endpoint."""
+    company_name: str  # e.g. "DEMOULAS MARKET BASKET"
+    country: Optional[str] = None
+    zip_code: Optional[str] = None
+    url: Optional[str] = None
+
+
+class GeminiCompanyInfo(BaseModel):
+    """Structured company contact extracted by the Gemini two-step pipeline."""
+    phones: List[str] = Field(default_factory=list)
+    faxes: List[str] = Field(default_factory=list)
+    emails: List[str] = Field(default_factory=list)
+    addresses: List[str] = Field(default_factory=list)
+
+
+class GeminiSearchResult(BaseModel):
+    """Full response envelope returned by the /gemini-search/ endpoint."""
+    company_name: str
+    official_site: str = ""
+    company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
+
+
 # --- External Webhook Payload Model ---
 class WebhookPayload(BaseModel):
     status: str

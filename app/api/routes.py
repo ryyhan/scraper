@@ -7,9 +7,10 @@ from sqlmodel import Session, select, desc, String
 
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInfo
+from app.models import GeminiSearchRequest, GeminiSearchResult
 from app.api.deps import get_session
 from app.services import ScraperService, LLMService, WebhookService
-from app.services import OpenAISearchService
+from app.services import OpenAISearchService, GeminiSearchService
 from app.core.config import settings
 
 router = APIRouter()
@@ -313,6 +314,145 @@ async def get_openai_task_status(
 ):
     """
     Poll the status and result of an OpenAI search task by *task_id*.
+    """
+    task = session.get(TaskRecord, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": task.message,
+        "result": task.result_data,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemini Search Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_gemini_search_task(task_id: str, request: GeminiSearchRequest) -> None:
+    """
+    Background coroutine that executes the synchronous Gemini two-step pipeline
+    inside a thread pool so the event loop is never blocked, then persists the
+    result to the database.
+
+    The Gemini SDK is synchronous, so ``asyncio.to_thread`` is used to offload
+    the blocking network I/O — identical to the pattern used for the OpenAI service.
+    """
+    logger.info(
+        f"[gemini-search] Task {task_id}: starting for company={request.company_name!r}"
+    )
+
+    status = "FAILURE"
+    message = "Unknown error"
+    result_data: dict = {"company_name": request.company_name}
+
+    try:
+        service = GeminiSearchService()
+
+        # Run the synchronous SDK calls in a thread so we don't block the event loop
+        result: GeminiSearchResult = await asyncio.to_thread(
+            service.structured_llm_call,
+            request,
+            GeminiSearchResult,
+        )
+
+        status = "SUCCESS"
+        message = "Successfully extracted contact info via Gemini"
+        result_data = result.model_dump()
+        logger.info(f"[gemini-search] Task {task_id}: completed successfully")
+
+    except Exception as exc:
+        message = str(exc)
+        logger.error(f"[gemini-search] Task {task_id}: failed – {exc}")
+
+    # Persist outcome to the shared TaskRecord table
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task = session.get(TaskRecord, task_id)
+        if task:
+            task.status = status
+            task.message = message
+            task.result_data = result_data
+            task.updated_at = datetime.utcnow()
+            session.add(task)
+            session.commit()
+
+
+@router.post("/gemini-search/", summary="Search company contact info via Gemini")
+async def create_gemini_search_task(
+    request: GeminiSearchRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """
+    Enqueue an asynchronous Gemini-powered contact-info lookup for *company_name*.
+
+    Gemini performs live Google Search grounding (Step 1) and then distils the
+    raw research into a validated structured JSON result (Step 2).
+
+    Returns a *task_id* that can be polled via **GET /gemini-search/{task_id}**.
+    """
+    task_id = str(uuid.uuid4())
+    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    session.add(task_record)
+    session.commit()
+
+    background_tasks.add_task(
+        _process_gemini_search_task,
+        task_id,
+        request,
+    )
+
+    return {"task_id": task_id, "status": "IN_PROGRESS"}
+
+
+@router.get("/gemini-search/failed/", summary="List failed Gemini search tasks")
+async def get_failed_gemini_tasks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Return the most recently failed Gemini search tasks (most recent first).
+    """
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(
+            TaskRecord.message.contains("Gemini")  # type: ignore[union-attr]
+            | TaskRecord.result_data.cast(String).contains("company_name")  # type: ignore[union-attr]
+        )
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
+    tasks = session.exec(statement).all()
+
+    results = []
+    for t in tasks:
+        company_name = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            company_name = t.result_data.get("company_name", "Unknown")
+
+        results.append({
+            "task_id": t.task_id,
+            "company_name": company_name,
+            "message": t.message,
+            "failed_at": t.updated_at,
+        })
+
+    return {"failed_tasks": results}
+
+
+@router.get("/gemini-search/{task_id}", summary="Get Gemini search task status")
+async def get_gemini_task_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    """
+    Poll the status and result of a Gemini search task by *task_id*.
     """
     task = session.get(TaskRecord, task_id)
     if not task:

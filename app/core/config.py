@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
     SERPER_API_KEY: str = ""
     SEARCH_PROVIDER: str = "duckduckgo" # Can be 'duckduckgo' or 'serper'
     DATABASE_URL: str = "sqlite:///./tasks.db"

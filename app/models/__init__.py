@@ -7,4 +7,7 @@ from .models import (
     OpenAISearchRequest,
     OpenAICompanyInfo,
     OpenAISearchResult,
+    GeminiSearchRequest,
+    GeminiCompanyInfo,
+    GeminiSearchResult,
 )

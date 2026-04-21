@@ -3,6 +3,7 @@ uvicorn
 playwright
 groq
 openai
+google-genai
 sqlmodel
 aiosqlite
 beautifulsoup4
