@@ -39,9 +39,9 @@ class OpenAISearchService:
     # Public API
     # ------------------------------------------------------------------
 
-    def structured_llm_call(self, company_query: str, model_class: Type[T]) -> T:
+    def structured_llm_call(self, request: BaseModel, model_class: Type[T]) -> T:
         """
-        Execute the two-step research + extraction pipeline for *company_query*
+        Execute the two-step research + extraction pipeline for the target
         and return a validated instance of *model_class*.
 
         Raises:
@@ -49,11 +49,23 @@ class OpenAISearchService:
             pydantic.ValidationError: if the LLM output cannot be coerced into
                                       the target schema.
         """
-        logger.info(f"[OpenAISearchService] Starting research for: {company_query!r}")
+        company_name = getattr(request, "company_name", str(request))
+        country = getattr(request, "country", None)
+        zip_code = getattr(request, "zip_code", None)
+        url = getattr(request, "url", None)
+
+        logger.info(f"[OpenAISearchService] Starting research for: {company_name!r}")
+
+        context_parts = [f"Company: {company_name}"]
+        if country: context_parts.append(f"Country: {country}")
+        if zip_code: context_parts.append(f"Zip Code: {zip_code}")
+        if url: context_parts.append(f"URL: {url}")
+        
+        target_context = " | ".join(context_parts)
 
         # ── Step 1: Deep Research (The "Gatherer") ────────────────────────
         research_prompt = (
-            f"Deep research task: Find contact information for {company_query}.\n\n"
+            f"Deep research task: Find contact information for the following target:\n{target_context}\n\n"
             "GOALS:\n"
             "1. Prioritize Human Resources (HR) contact info.\n"
             "2. If HR is unavailable, find General/Corporate info.\n"
@@ -78,7 +90,7 @@ class OpenAISearchService:
             "2. For addresses, format each distinct location into a single fully readable string (e.g., '123 Main St, City, State 12345').\n"
             f"3. The response MUST be a VALID JSON object matching exactly this schema:\n{json.dumps(model_class.model_json_schema(), indent=2)}\n"
             f"4. IMPORTANT: DO NOT return the schema definition itself. Return the ACTUAL extracted data values.\n"
-            f"5. Make sure to fill in the 'company_name' key with the target company: {company_query}."
+            f"5. Make sure to fill in the 'company_name' key with the target company: {company_name}."
         )
 
         final_response = self._client.responses.create(
@@ -91,7 +103,7 @@ class OpenAISearchService:
         data = json.loads(final_response.output_text)
         cleaned_data = self._clean_dict(data)
         result = model_class.model_validate(cleaned_data)
-        logger.info(f"[OpenAISearchService] Extraction complete for: {company_query!r}")
+        logger.info(f"[OpenAISearchService] Extraction complete for: {company_name!r}")
         return result
 
     # ------------------------------------------------------------------

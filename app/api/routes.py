@@ -204,17 +204,17 @@ async def webhook_mock(payload: WebhookPayload):
 # OpenAI Search Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _process_openai_search_task(task_id: str, company_name: str) -> None:
+async def _process_openai_search_task(task_id: str, request: OpenAISearchRequest) -> None:
     """
     Background coroutine that executes the synchronous OpenAI two-step pipeline
     inside a thread pool so the event loop is never blocked, then persists the
     result to the database.
     """
-    logger.info(f"[openai-search] Task {task_id}: starting for company={company_name!r}")
+    logger.info(f"[openai-search] Task {task_id}: starting for company={request.company_name!r}")
 
     status = "FAILURE"
     message = "Unknown error"
-    result_data: dict = {"company_name": company_name}
+    result_data: dict = {"company_name": request.company_name}
 
     try:
         service = OpenAISearchService()
@@ -222,7 +222,7 @@ async def _process_openai_search_task(task_id: str, company_name: str) -> None:
         # Run the synchronous SDK calls in a thread so we don't block the loop
         result: OpenAISearchResult = await asyncio.to_thread(
             service.structured_llm_call,
-            company_name,
+            request,
             OpenAISearchResult,
         )
 
@@ -267,7 +267,7 @@ async def create_openai_search_task(
     background_tasks.add_task(
         _process_openai_search_task,
         task_id,
-        request.company_name,
+        request,
     )
 
     return {"task_id": task_id, "status": "IN_PROGRESS"}

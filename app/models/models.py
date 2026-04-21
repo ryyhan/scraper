@@ -71,14 +71,18 @@ class ScrapeResult(BaseModel):
 class OpenAISearchRequest(BaseModel):
     """Request body for the POST /openai-search/ endpoint."""
     company_name: str  # e.g. "DEMOULAS MARKET BASKET"
+    country: Optional[str] = None
+    zip_code: Optional[str] = None
+    url: Optional[str] = None
 
 
 class OpenAICompanyInfo(BaseModel):
     """Structured company contact extracted by the OpenAI two-step pipeline."""
-    phone: List[str] = Field(default_factory=list)
-    fax: List[str] = Field(default_factory=list)
-    email: List[str] = Field(default_factory=list)
-    address: List[str] = Field(default_factory=list)
+    phones: List[str] = Field(default_factory=list)
+    faxes: List[str] = Field(default_factory=list)
+    emails: List[str] = Field(default_factory=list)
+    addresses: List[str] = Field(default_factory=list)
+
 
 
 class OpenAISearchResult(BaseModel):
