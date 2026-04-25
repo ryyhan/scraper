@@ -8,9 +8,11 @@ from sqlmodel import Session, select, desc, String
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInfo
 from app.models import GeminiSearchRequest, GeminiSearchResult
+from app.models import VoeRequest, VoeVerificationResult
 from app.api.deps import get_session
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
+from app.services import VoeVerificationService
 from app.core.config import settings
 
 router = APIRouter()
@@ -453,6 +455,157 @@ async def get_gemini_task_status(
 ):
     """
     Poll the status and result of a Gemini search task by *task_id*.
+    """
+    task = session.get(TaskRecord, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": task.message,
+        "result": task.result_data,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOE (Verification of Employment) Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
+    """
+    Background coroutine that runs the two-step VOE verification pipeline
+    inside a thread pool (Gemini SDK is synchronous) then persists the
+    result to the shared TaskRecord table.
+    """
+    logger.info(
+        f"[verify-voe] Task {task_id}: starting for "
+        f"{request.full_name!r} @ {request.company!r}"
+    )
+
+    status = "FAILURE"
+    message = "Unknown error"
+    result_data: dict = {
+        "full_name": request.full_name,
+        "company": request.company,
+        "job_title": request.job_title,
+    }
+
+    try:
+        service = VoeVerificationService()
+
+        # Offload synchronous Gemini SDK calls to a thread pool
+        result: VoeVerificationResult = await asyncio.to_thread(
+            service.verify,
+            request,
+        )
+
+        status = "SUCCESS"
+        message = (
+            f"Verification complete – score={result.confidence_score} "
+            f"verdict={result.verdict}"
+        )
+        result_data = result.model_dump()
+        logger.info(f"[verify-voe] Task {task_id}: completed successfully")
+
+    except Exception as exc:
+        message = str(exc)
+        logger.error(f"[verify-voe] Task {task_id}: failed – {exc}")
+
+    # Persist outcome to the shared TaskRecord table
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task = session.get(TaskRecord, task_id)
+        if task:
+            task.status = status
+            task.message = message
+            task.result_data = result_data
+            task.updated_at = datetime.utcnow()
+            session.add(task)
+            session.commit()
+
+
+@router.post("/verify-voe/", summary="Verify employment of a person via Gemini web research")
+async def create_voe_task(
+    request: VoeRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """
+    Enqueue an asynchronous employment-verification job for the given person.
+
+    Gemini performs live Google Search grounding to gather evidence across
+    LinkedIn, company directories, press releases, and news articles, then
+    scores its confidence (0–10) against a calibrated rubric.
+
+    Returns a *task_id* that can be polled via **GET /verify-voe/{task_id}**.
+
+    **Required fields:** `full_name`, `job_title`, `company`  
+    **Optional fields:** `zip_code`, `city`, `country` (improve disambiguation)
+    """
+    task_id = str(uuid.uuid4())
+    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    session.add(task_record)
+    session.commit()
+
+    background_tasks.add_task(_process_voe_task, task_id, request)
+
+    return {"task_id": task_id, "status": "IN_PROGRESS"}
+
+
+@router.get("/verify-voe/failed/", summary="List failed VOE verification tasks")
+async def get_failed_voe_tasks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Return the most recently failed VOE verification tasks (most recent first).
+    """
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(
+            TaskRecord.result_data.cast(String).contains("full_name")  # type: ignore[union-attr]
+        )
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
+    tasks = session.exec(statement).all()
+
+    results = []
+    for t in tasks:
+        full_name = "Unknown"
+        company = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            full_name = t.result_data.get("full_name", "Unknown")
+            company = t.result_data.get("company", "Unknown")
+
+        results.append({
+            "task_id": t.task_id,
+            "full_name": full_name,
+            "company": company,
+            "message": t.message,
+            "failed_at": t.updated_at,
+        })
+
+    return {"failed_tasks": results}
+
+
+@router.get("/verify-voe/{task_id}", summary="Get VOE verification task status")
+async def get_voe_task_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    """
+    Poll the status and result of a VOE verification task by *task_id*.
+
+    Once `status` is `SUCCESS`, the `result` object contains:
+    - `confidence_score` (0.0–10.0)
+    - `verdict` (VERIFIED / LIKELY / UNVERIFIED / CONTRADICTED)
+    - `evidence_summary` (human-readable explanation)
+    - `sources_found` (list of URLs/publications used as evidence)
     """
     task = session.get(TaskRecord, task_id)
     if not task:

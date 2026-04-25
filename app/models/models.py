@@ -117,6 +117,29 @@ class GeminiSearchResult(BaseModel):
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
 
 
+# --- VOE (Verification of Employment) Models ---
+
+class VoeRequest(BaseModel):
+    """Request body for the POST /verify-voe/ endpoint."""
+    full_name: str          # e.g. "Jane Doe"
+    job_title: str          # e.g. "Senior Software Engineer"
+    company: str            # e.g. "Acme Corp"
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+
+
+class VoeVerificationResult(BaseModel):
+    """Structured result returned by the /verify-voe/ endpoint."""
+    full_name: str
+    company: str
+    job_title: str
+    confidence_score: float     # 0.0 – 10.0  (calibrated rubric applied in prompt)
+    verdict: str                # "VERIFIED" | "LIKELY" | "UNVERIFIED" | "CONTRADICTED"
+    evidence_summary: str       # 2–3 sentence human-readable explanation
+    sources_found: List[str]    # URLs or source names used as evidence
+
+
 # --- External Webhook Payload Model ---
 class WebhookPayload(BaseModel):
     status: str

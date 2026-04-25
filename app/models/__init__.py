@@ -10,4 +10,6 @@ from .models import (
     GeminiSearchRequest,
     GeminiCompanyInfo,
     GeminiSearchResult,
+    VoeRequest,
+    VoeVerificationResult,
 )
