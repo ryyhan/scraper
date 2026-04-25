@@ -171,7 +171,14 @@ class GeminiSearchService:
             "3. Look specifically for a Fax number.\n"
             "4. Find ALL available contact details: phones, emails, faxes, addresses.\n"
             "5. Provide the official website URL if found.\n"
-            "Be thorough and search multiple sources."
+            "Be thorough and search multiple sources.\n\n"
+            "CRITICAL INSTRUCTION FOR EMAILS:\n"
+            "If you see '[email protected]' on the company's website, it means their emails are hidden by Cloudflare.\n"
+            "If this happens, DO NOT return '[email protected]'. Instead, you MUST run a new search query to find the company's email on OTHER public sources such as:\n"
+            "- Press releases (PR Newswire, Business Wire)\n"
+            "- LinkedIn, Apollo, or ZoomInfo summaries\n"
+            "- Public PDF documents or SEC filings\n"
+            "- Official social media pages"
         )
 
         grounding_tool = genai_types.Tool(
@@ -220,7 +227,8 @@ class GeminiSearchService:
             "4. Fill 'official_site' with the primary official website URL if found, "
             "otherwise leave it as an empty string.\n"
             "5. Return ONLY the extracted data values — do NOT return the schema itself.\n"
-            "6. If a field has no data, use an empty array [] or empty string \"\"."
+            "6. If a field has no data, use an empty array [] or empty string \"\".\n"
+            "7. EXCLUDE PLACEHOLDERS: Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...'). Only extract real, verified contact emails."
         )
 
         extraction_config = genai_types.GenerateContentConfig(

@@ -70,7 +70,14 @@ class OpenAISearchService:
             "1. Prioritize Human Resources (HR) contact info.\n"
             "2. If HR is unavailable, find General/Corporate info.\n"
             "3. Look for a Fax number.\n"
-            "4. Find ALL available contact details (phones, emails, faxes, addresses)."
+            "4. Find ALL available contact details (phones, emails, faxes, addresses).\n\n"
+            "CRITICAL INSTRUCTION FOR EMAILS:\n"
+            "If you see '[email protected]' on the company's website, it means their emails are hidden by Cloudflare.\n"
+            "If this happens, DO NOT return '[email protected]'. Instead, you MUST run a new search query to find the company's email on OTHER public sources such as:\n"
+            "- Press releases (PR Newswire, Business Wire)\n"
+            "- LinkedIn, Apollo, or ZoomInfo summaries\n"
+            "- Public PDF documents or SEC filings\n"
+            "- Official social media pages"
         )
 
         research_response = self._client.responses.create(
@@ -90,7 +97,8 @@ class OpenAISearchService:
             "2. For addresses, format each distinct location into a single fully readable string (e.g., '123 Main St, City, State 12345').\n"
             f"3. The response MUST be a VALID JSON object matching exactly this schema:\n{json.dumps(model_class.model_json_schema(), indent=2)}\n"
             f"4. IMPORTANT: DO NOT return the schema definition itself. Return the ACTUAL extracted data values.\n"
-            f"5. Make sure to fill in the 'company_name' key with the target company: {company_name}."
+            f"5. Make sure to fill in the 'company_name' key with the target company: {company_name}.\n"
+            "6. EXCLUDE PLACEHOLDERS: Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...'). Only extract real, verified contact emails."
         )
 
         final_response = self._client.responses.create(
