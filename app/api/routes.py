@@ -9,10 +9,12 @@ from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInfo
 from app.models import GeminiSearchRequest, GeminiSearchResult
 from app.models import VoeRequest, VoeVerificationResult
+from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.api.deps import get_session
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
 from app.services import VoeVerificationService
+from app.services import CombinedSearchService
 from app.core.config import settings
 
 router = APIRouter()
@@ -619,3 +621,132 @@ async def get_voe_task_status(
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Combined Search Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_combined_search_task(task_id: str, request: CombinedSearchRequest) -> None:
+    """
+    Background coroutine that executes the combined OpenAI and Gemini search pipeline
+    then persists the result to the shared TaskRecord table.
+    """
+    logger.info(
+        f"[combined-search] Task {task_id}: starting for company={request.company_name!r}"
+    )
+
+    status = "FAILURE"
+    message = "Unknown error"
+    result_data: dict = {"company_name": request.company_name}
+
+    try:
+        service = CombinedSearchService()
+        result: CombinedSearchResult = await service.search(request)
+
+        status = "SUCCESS"
+        message = "Successfully extracted contact info via combined search"
+        result_data = result.model_dump()
+        logger.info(f"[combined-search] Task {task_id}: completed successfully")
+
+    except Exception as exc:
+        message = str(exc)
+        logger.error(f"[combined-search] Task {task_id}: failed – {exc}")
+
+    # Persist outcome to the shared TaskRecord table
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task = session.get(TaskRecord, task_id)
+        if task:
+            task.status = status
+            task.message = message
+            task.result_data = result_data
+            task.updated_at = datetime.utcnow()
+            session.add(task)
+            session.commit()
+
+
+@router.post("/combined-search/", summary="Search company contact info via combined OpenAI and Gemini")
+async def create_combined_search_task(
+    request: CombinedSearchRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """
+    Enqueue an asynchronous combined search job for the given company.
+    
+    This calls both the OpenAI and Gemini pipelines concurrently and aggregates their results.
+    
+    Returns a *task_id* that can be polled via **GET /combined-search/{task_id}**.
+    """
+    task_id = str(uuid.uuid4())
+    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    session.add(task_record)
+    session.commit()
+
+    background_tasks.add_task(
+        _process_combined_search_task,
+        task_id,
+        request,
+    )
+
+    return {"task_id": task_id, "status": "IN_PROGRESS"}
+
+
+@router.get("/combined-search/failed/", summary="List failed Combined search tasks")
+async def get_failed_combined_tasks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Return the most recently failed combined search tasks (most recent first).
+    """
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(
+            TaskRecord.message.contains("combined")  # type: ignore[union-attr]
+            | TaskRecord.result_data.cast(String).contains("company_name")  # type: ignore[union-attr]
+        )
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
+    tasks = session.exec(statement).all()
+
+    results = []
+    for t in tasks:
+        company_name = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            company_name = t.result_data.get("company_name", "Unknown")
+
+        results.append({
+            "task_id": t.task_id,
+            "company_name": company_name,
+            "message": t.message,
+            "failed_at": t.updated_at,
+        })
+
+    return {"failed_tasks": results}
+
+
+@router.get("/combined-search/{task_id}", summary="Get Combined search task status")
+async def get_combined_task_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    """
+    Poll the status and result of a combined search task by *task_id*.
+    """
+    task = session.get(TaskRecord, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": task.message,
+        "result": task.result_data,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+

@@ -4,3 +4,4 @@ from .webhook import WebhookService
 from .openai_search import OpenAISearchService
 from .gemini_search import GeminiSearchService
 from .voe_verification import VoeVerificationService
+from .combined_search import CombinedSearchService

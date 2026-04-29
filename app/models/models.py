@@ -140,6 +140,33 @@ class VoeVerificationResult(BaseModel):
     sources_found: List[str]    # URLs or source names used as evidence
 
 
+# --- Combined Search Models ---
+
+class CombinedSearchRequest(BaseModel):
+    """Request body for the POST /combined-search/ endpoint."""
+    company_name: str
+    country: Optional[str] = None
+    zip_code: Optional[str] = None
+    url: Optional[str] = None
+
+
+class CombinedCompanyInfo(BaseModel):
+    """Structured company contact extracted by combining OpenAI and Gemini."""
+    phones: List[str] = Field(default_factory=list)
+    faxes: List[str] = Field(default_factory=list)
+    emails: List[str] = Field(default_factory=list)
+    addresses: List[str] = Field(default_factory=list)
+
+
+class CombinedSearchResult(BaseModel):
+    """Full response envelope returned by the /combined-search/ endpoint."""
+    company_name: str
+    official_site: str = ""
+    company_info: CombinedCompanyInfo = Field(default_factory=CombinedCompanyInfo)
+    openai_result: Optional[OpenAISearchResult] = None
+    gemini_result: Optional[GeminiSearchResult] = None
+
+
 # --- External Webhook Payload Model ---
 class WebhookPayload(BaseModel):
     status: str

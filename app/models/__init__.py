@@ -12,4 +12,7 @@ from .models import (
     GeminiSearchResult,
     VoeRequest,
     VoeVerificationResult,
+    CombinedSearchRequest,
+    CombinedCompanyInfo,
+    CombinedSearchResult,
 )
