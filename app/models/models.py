@@ -74,6 +74,7 @@ class OpenAISearchRequest(BaseModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     url: Optional[str] = None
+    max_limit: Optional[int] = None
 
 
 class OpenAICompanyInfo(BaseModel):
@@ -100,6 +101,7 @@ class GeminiSearchRequest(BaseModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     url: Optional[str] = None
+    max_limit: Optional[int] = None
 
 
 class GeminiCompanyInfo(BaseModel):
@@ -148,6 +150,7 @@ class CombinedSearchRequest(BaseModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     url: Optional[str] = None
+    max_limit: Optional[int] = None
 
 
 class CombinedCompanyInfo(BaseModel):

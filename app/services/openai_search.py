@@ -53,6 +53,7 @@ class OpenAISearchService:
         country = getattr(request, "country", None)
         zip_code = getattr(request, "zip_code", None)
         url = getattr(request, "url", None)
+        max_limit = getattr(request, "max_limit", None)
 
         logger.info(f"[OpenAISearchService] Starting research for: {company_name!r}")
 
@@ -111,6 +112,13 @@ class OpenAISearchService:
         data = json.loads(final_response.output_text)
         cleaned_data = self._clean_dict(data)
         result = model_class.model_validate(cleaned_data)
+        
+        if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
+            result.company_info.phones = result.company_info.phones[:max_limit]
+            result.company_info.faxes = result.company_info.faxes[:max_limit]
+            result.company_info.emails = result.company_info.emails[:max_limit]
+            result.company_info.addresses = result.company_info.addresses[:max_limit]
+
         logger.info(f"[OpenAISearchService] Extraction complete for: {company_name!r}")
         return result
 

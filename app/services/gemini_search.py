@@ -117,6 +117,7 @@ class GeminiSearchService:
         country: str | None = getattr(request, "country", None)
         zip_code: str | None = getattr(request, "zip_code", None)
         url: str | None = getattr(request, "url", None)
+        max_limit: int | None = getattr(request, "max_limit", None)
 
         logger.info(f"[GeminiSearchService] Starting research for: {company_name!r}")
 
@@ -127,6 +128,12 @@ class GeminiSearchService:
 
         # ── Step 2: Extraction (The "Extractor") ──────────────────────────────
         result: T = self._extract(research_text, company_name, model_class)
+
+        if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
+            result.company_info.phones = result.company_info.phones[:max_limit]
+            result.company_info.faxes = result.company_info.faxes[:max_limit]
+            result.company_info.emails = result.company_info.emails[:max_limit]
+            result.company_info.addresses = result.company_info.addresses[:max_limit]
 
         logger.info(f"[GeminiSearchService] Extraction complete for: {company_name!r}")
         return result

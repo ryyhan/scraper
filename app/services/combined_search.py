@@ -33,6 +33,7 @@ class CombinedSearchService:
 
     async def search(self, request: CombinedSearchRequest) -> CombinedSearchResult:
         company_name = request.company_name
+        max_limit = getattr(request, "max_limit", None)
         logger.info(f"[CombinedSearchService] Starting combined research for: {company_name!r}")
 
         openai_req = OpenAISearchRequest(**request.model_dump())
@@ -101,10 +102,10 @@ class CombinedSearchService:
                 if a: addresses.add(a)
 
         company_info = CombinedCompanyInfo(
-            phones=sorted(list(phones)),
-            faxes=sorted(list(faxes)),
-            emails=sorted(list(emails)),
-            addresses=sorted(list(addresses)),
+            phones=sorted(list(phones))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(phones)),
+            faxes=sorted(list(faxes))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(faxes)),
+            emails=sorted(list(emails))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(emails)),
+            addresses=sorted(list(addresses))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(addresses)),
         )
 
         logger.info(f"[CombinedSearchService] Completed combined research for: {company_name!r}")
