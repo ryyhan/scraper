@@ -16,6 +16,7 @@ from app.models import (
     OpenAISearchResult,
     GeminiSearchRequest,
     GeminiSearchResult,
+    TaggedContact,
 )
 from app.services.openai_search import OpenAISearchService
 from app.services.gemini_search import GeminiSearchService
@@ -67,10 +68,10 @@ class CombinedSearchService:
             raise RuntimeError("Both OpenAI and Gemini search pipelines failed.")
 
         # Aggregate the results
-        phones = set()
-        faxes = set()
-        emails = set()
-        addresses = set()
+        phones: dict[str, TaggedContact] = {}
+        faxes: dict[str, TaggedContact] = {}
+        emails: dict[str, TaggedContact] = {}
+        addresses: dict[str, TaggedContact] = {}
         official_site = ""
 
         # Process OpenAI Result
@@ -79,13 +80,15 @@ class CombinedSearchService:
                 official_site = openai_result.official_site
             
             for p in openai_result.company_info.phones:
-                if p: phones.add(p)
+                if p and p.value not in phones: phones[p.value] = p
             for f in openai_result.company_info.faxes:
-                if f: faxes.add(f)
+                if f and f.value not in faxes: faxes[f.value] = f
             for e in openai_result.company_info.emails:
-                if e: emails.add(e.lower())
+                if e:
+                    e_val = e.value.lower()
+                    if e_val not in emails: emails[e_val] = e
             for a in openai_result.company_info.addresses:
-                if a: addresses.add(a)
+                if a and a.value not in addresses: addresses[a.value] = a
 
         # Process Gemini Result
         if gemini_result:
@@ -93,19 +96,27 @@ class CombinedSearchService:
                 official_site = gemini_result.official_site
             
             for p in gemini_result.company_info.phones:
-                if p: phones.add(p)
+                if p and p.value not in phones: phones[p.value] = p
             for f in gemini_result.company_info.faxes:
-                if f: faxes.add(f)
+                if f and f.value not in faxes: faxes[f.value] = f
             for e in gemini_result.company_info.emails:
-                if e: emails.add(e.lower())
+                if e:
+                    e_val = e.value.lower()
+                    if e_val not in emails: emails[e_val] = e
             for a in gemini_result.company_info.addresses:
-                if a: addresses.add(a)
+                if a and a.value not in addresses: addresses[a.value] = a
+
+        # Sort values
+        phones_list = sorted(list(phones.values()), key=lambda x: x.value)
+        faxes_list = sorted(list(faxes.values()), key=lambda x: x.value)
+        emails_list = sorted(list(emails.values()), key=lambda x: x.value)
+        addresses_list = sorted(list(addresses.values()), key=lambda x: x.value)
 
         company_info = CombinedCompanyInfo(
-            phones=sorted(list(phones))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(phones)),
-            faxes=sorted(list(faxes))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(faxes)),
-            emails=sorted(list(emails))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(emails)),
-            addresses=sorted(list(addresses))[:max_limit] if max_limit is not None and max_limit > 0 else sorted(list(addresses)),
+            phones=phones_list[:max_limit] if max_limit is not None and max_limit > 0 else phones_list,
+            faxes=faxes_list[:max_limit] if max_limit is not None and max_limit > 0 else faxes_list,
+            emails=emails_list[:max_limit] if max_limit is not None and max_limit > 0 else emails_list,
+            addresses=addresses_list[:max_limit] if max_limit is not None and max_limit > 0 else addresses_list,
         )
 
         logger.info(f"[CombinedSearchService] Completed combined research for: {company_name!r}")

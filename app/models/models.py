@@ -3,13 +3,31 @@ from datetime import datetime
 from sqlmodel import SQLModel, Field, JSON
 from pydantic import BaseModel, field_validator, ConfigDict
 import re
+from enum import Enum
 
 # --- API Request Model ---
 class SearchRequest(BaseModel):
     poe_name: str
     timeout: Optional[int] = 120  # Default timeout in seconds
 
-# --- LLM / Result Models ---
+# --- Shared Contact Models ---
+class ContactTag(str, Enum):
+    HUMAN_RESOURCE = "Human Resource"
+    PAYROLL = "Payroll"
+    ADMIN = "Admin"
+    CAREERS = "Careers"
+    PERSONNEL = "Personnel"
+    FINANCE = "Finance"
+    SECRETARY = "Secretary"
+    LABOR_RELATIONS = "Labor relations"
+    OTHERS = "Others"
+
+class TaggedContact(BaseModel):
+    value: str
+    tag: ContactTag
+    context: Optional[str] = Field(default="", description="Context about where this contact was found or who it belongs to")
+
+# --- Legacy / Result Models ---
 class ContactInfo(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
     
@@ -79,10 +97,10 @@ class OpenAISearchRequest(BaseModel):
 
 class OpenAICompanyInfo(BaseModel):
     """Structured company contact extracted by the OpenAI two-step pipeline."""
-    phones: List[str] = Field(default_factory=list)
-    faxes: List[str] = Field(default_factory=list)
-    emails: List[str] = Field(default_factory=list)
-    addresses: List[str] = Field(default_factory=list)
+    phones: List[TaggedContact] = Field(default_factory=list)
+    faxes: List[TaggedContact] = Field(default_factory=list)
+    emails: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[TaggedContact] = Field(default_factory=list)
 
 
 
@@ -106,10 +124,10 @@ class GeminiSearchRequest(BaseModel):
 
 class GeminiCompanyInfo(BaseModel):
     """Structured company contact extracted by the Gemini two-step pipeline."""
-    phones: List[str] = Field(default_factory=list)
-    faxes: List[str] = Field(default_factory=list)
-    emails: List[str] = Field(default_factory=list)
-    addresses: List[str] = Field(default_factory=list)
+    phones: List[TaggedContact] = Field(default_factory=list)
+    faxes: List[TaggedContact] = Field(default_factory=list)
+    emails: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[TaggedContact] = Field(default_factory=list)
 
 
 class GeminiSearchResult(BaseModel):
@@ -155,10 +173,10 @@ class CombinedSearchRequest(BaseModel):
 
 class CombinedCompanyInfo(BaseModel):
     """Structured company contact extracted by combining OpenAI and Gemini."""
-    phones: List[str] = Field(default_factory=list)
-    faxes: List[str] = Field(default_factory=list)
-    emails: List[str] = Field(default_factory=list)
-    addresses: List[str] = Field(default_factory=list)
+    phones: List[TaggedContact] = Field(default_factory=list)
+    faxes: List[TaggedContact] = Field(default_factory=list)
+    emails: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[TaggedContact] = Field(default_factory=list)
 
 
 class CombinedSearchResult(BaseModel):
