@@ -27,6 +27,17 @@ class TaggedContact(BaseModel):
     tag: ContactTag
     context: Optional[str] = Field(default="", description="Context about where this contact was found or who it belongs to")
 
+class StructuredAddress(BaseModel):
+    address1: str = Field(default="", description="First line of the address (e.g., street, building)")
+    address2: str = Field(default="", description="Second line of the address (e.g., suite, apartment)")
+    city: str = Field(default="")
+    state: str = Field(default="")
+    zip: str = Field(default="")
+    country: str = Field(default="")
+    countryCode: str = Field(default="")
+    tag: ContactTag
+    context: Optional[str] = Field(default=None, description="Context about where this contact was found or who it belongs to")
+
 # --- Legacy / Result Models ---
 class ContactInfo(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
@@ -100,7 +111,7 @@ class OpenAICompanyInfo(BaseModel):
     phones: List[TaggedContact] = Field(default_factory=list)
     faxes: List[TaggedContact] = Field(default_factory=list)
     emails: List[TaggedContact] = Field(default_factory=list)
-    addresses: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[StructuredAddress] = Field(default_factory=list)
 
 
 
@@ -127,7 +138,7 @@ class GeminiCompanyInfo(BaseModel):
     phones: List[TaggedContact] = Field(default_factory=list)
     faxes: List[TaggedContact] = Field(default_factory=list)
     emails: List[TaggedContact] = Field(default_factory=list)
-    addresses: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[StructuredAddress] = Field(default_factory=list)
 
 
 class GeminiSearchResult(BaseModel):
@@ -176,7 +187,7 @@ class CombinedCompanyInfo(BaseModel):
     phones: List[TaggedContact] = Field(default_factory=list)
     faxes: List[TaggedContact] = Field(default_factory=list)
     emails: List[TaggedContact] = Field(default_factory=list)
-    addresses: List[TaggedContact] = Field(default_factory=list)
+    addresses: List[StructuredAddress] = Field(default_factory=list)
 
 
 class CombinedSearchResult(BaseModel):

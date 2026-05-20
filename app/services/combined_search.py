@@ -17,6 +17,7 @@ from app.models import (
     GeminiSearchRequest,
     GeminiSearchResult,
     TaggedContact,
+    StructuredAddress,
 )
 from app.services.openai_search import OpenAISearchService
 from app.services.gemini_search import GeminiSearchService
@@ -71,7 +72,7 @@ class CombinedSearchService:
         phones: dict[str, TaggedContact] = {}
         faxes: dict[str, TaggedContact] = {}
         emails: dict[str, TaggedContact] = {}
-        addresses: dict[str, TaggedContact] = {}
+        addresses: dict[str, StructuredAddress] = {}
         official_site = ""
 
         # Process OpenAI Result
@@ -88,7 +89,9 @@ class CombinedSearchService:
                     e_val = e.value.lower()
                     if e_val not in emails: emails[e_val] = e
             for a in openai_result.company_info.addresses:
-                if a and a.value not in addresses: addresses[a.value] = a
+                if a:
+                    key = f"{a.address1}|{a.city}|{a.zip}".lower()
+                    if key not in addresses: addresses[key] = a
 
         # Process Gemini Result
         if gemini_result:
@@ -104,13 +107,15 @@ class CombinedSearchService:
                     e_val = e.value.lower()
                     if e_val not in emails: emails[e_val] = e
             for a in gemini_result.company_info.addresses:
-                if a and a.value not in addresses: addresses[a.value] = a
+                if a:
+                    key = f"{a.address1}|{a.city}|{a.zip}".lower()
+                    if key not in addresses: addresses[key] = a
 
         # Sort values
         phones_list = sorted(list(phones.values()), key=lambda x: x.value)
         faxes_list = sorted(list(faxes.values()), key=lambda x: x.value)
         emails_list = sorted(list(emails.values()), key=lambda x: x.value)
-        addresses_list = sorted(list(addresses.values()), key=lambda x: x.value)
+        addresses_list = sorted(list(addresses.values()), key=lambda x: f"{x.address1} {x.city} {x.zip}")
 
         company_info = CombinedCompanyInfo(
             phones=phones_list[:max_limit] if max_limit is not None and max_limit > 0 else phones_list,

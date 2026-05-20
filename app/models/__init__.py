@@ -17,4 +17,5 @@ from .models import (
     CombinedSearchResult,
     TaggedContact,
     ContactTag,
+    StructuredAddress,
 )
