@@ -13,3 +13,5 @@ pydantic-settings
 loguru
 playwright-stealth
 tenacity
+pypdfium2
+python-multipart

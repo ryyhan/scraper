@@ -1,8 +1,10 @@
 import asyncio
+import time
 import uuid
+from typing import Literal
 from loguru import logger
 from datetime import datetime, timezone
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, UploadFile, File, Form
 from sqlmodel import Session, select, desc, String
 
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
@@ -10,11 +12,13 @@ from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInf
 from app.models import GeminiSearchRequest, GeminiSearchResult
 from app.models import VoeRequest, VoeVerificationResult
 from app.models import CombinedSearchRequest, CombinedSearchResult
+from app.models import PdfExtractionResult
 from app.api.deps import get_session
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
 from app.services import VoeVerificationService
 from app.services import CombinedSearchService
+from app.services import PdfExtractorService
 from app.core.config import settings
 
 router = APIRouter()
@@ -111,7 +115,12 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                     from app.models import ContactInfo
                     emails = set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', combined_text))
                     invalid_domains = ['.png', '.jpg', '.jpeg', '.gif', '.css', '.js', 'sentry', 'example', 'domain.com', '.webp', 'wixpress']
-                    valid_emails = [e for e in emails if not any(bad in e.lower() for bad in invalid_domains)]
+                    # Always strip the Cloudflare email-obfuscation placeholder
+                    cf_placeholder = '[email protected]'
+                    valid_emails = [
+                        e for e in emails
+                        if e.lower() != cf_placeholder and not any(bad in e.lower() for bad in invalid_domains)
+                    ]
                     if valid_emails:
                         logger.info(f"Task {task_id}: Extracted valid email from partial text post-timeout.")
                         final_result.poe_info = ContactInfo(
@@ -770,3 +779,114 @@ async def get_combined_task_status(
         "updated_at": task.updated_at,
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF Text Extraction Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/extract-pdf/",
+    response_model=PdfExtractionResult,
+    summary="Extract text from a PDF using a vision LLM",
+    tags=["PDF Extraction"],
+)
+async def extract_pdf(
+    file: UploadFile = File(
+        ...,
+        description="The PDF file to extract text from (max 20 MB).",
+    ),
+    provider: Literal["gemini", "openai"] = Form(
+        default="gemini",
+        description="Vision LLM provider: 'gemini' (default) or 'openai'.",
+    ),
+) -> PdfExtractionResult:
+    """
+    Extract full text from every page of an uploaded PDF file using a vision LLM.
+
+    **Gemini provider** (default)
+    - Uploads the raw PDF to the Gemini Files API and processes the entire
+      document natively — no page splitting required.
+    - Best for mixed text/image PDFs and scanned documents.
+    - Requires ``GEMINI_API_KEY`` in your environment.
+
+    **OpenAI provider**
+    - Renders each page to a JPEG image with ``pypdfium2`` and sends all
+      images to ``gpt-4o-mini`` vision in a single call.
+    - Requires ``OPENAI_API_KEY`` in your environment and
+      ``pypdfium2`` installed (``pip install pypdfium2``).
+
+    **Constraints**
+    - File must be a valid PDF (``.pdf`` extension + ``%PDF`` magic bytes).
+    - Maximum file size: ``PDF_MAX_FILE_SIZE_MB`` MB (default 20 MB;
+      override via environment variable).
+
+    **Response** is returned synchronously — no task polling required.
+    """
+    # ── 1. Read bytes eagerly so we can validate before any LLM call ───────
+    pdf_bytes = await file.read()
+    filename = file.filename or "upload.pdf"
+
+    # ── 2. Validate: extension, file size, PDF magic bytes ─────────────────
+    try:
+        PdfExtractorService.validate(pdf_bytes, filename)
+    except ValueError as exc:
+        status_code = 413 if "too large" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+    # ── 3. Fail fast if the requested provider key is missing ──────────────
+    if provider == "gemini" and not settings.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GEMINI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+    if provider == "openai" and not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "OPENAI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+
+    # ── 4. Run extraction in a thread (SDKs are synchronous) ──────────────
+    logger.info(
+        f"[extract-pdf] Starting: file={filename!r}, "
+        f"size={len(pdf_bytes) / 1024:.1f} KB, provider={provider!r}"
+    )
+
+    service = PdfExtractorService()
+    t0 = time.perf_counter()
+
+    try:
+        extracted_text, page_count = await asyncio.to_thread(
+            service.extract,
+            pdf_bytes,
+            filename,
+            provider,
+        )
+    except RuntimeError as exc:
+        # Raised by the service when a key is missing or pypdfium2 is absent
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"[extract-pdf] Unhandled error for file={filename!r}: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Text extraction failed: {exc}",
+        )
+
+    elapsed = round(time.perf_counter() - t0, 3)
+    logger.info(
+        f"[extract-pdf] Done: file={filename!r}, pages={page_count}, "
+        f"chars={len(extracted_text)}, elapsed={elapsed}s"
+    )
+
+    return PdfExtractionResult(
+        filename=filename,
+        provider=provider,
+        page_count=page_count,
+        extracted_text=extracted_text,
+        processing_time_seconds=elapsed,
+    )

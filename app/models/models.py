@@ -106,10 +106,39 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
     )
     return ContactTag.OTHERS
 
+# Cloudflare obfuscated placeholder and other known fake patterns to reject outright.
+_BLOCKED_EMAILS: set[str] = {
+    "[email protected]",
+}
+_BLOCKED_EMAIL_DOMAINS: tuple[str, ...] = ("cloudflare.com",)
+_PLACEHOLDER_PREFIXES: tuple[str, ...] = (
+    "email@", "example@", "name@", "abc@", "user@", "test@", "noreply@",
+)
+
+
 class TaggedContact(BaseModel):
     value: str
     tag: ContactTag
     context: Optional[str] = Field(default="", description="Context about where this contact was found or who it belongs to")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def reject_placeholder_emails(cls, v: Any) -> Any:
+        """Deterministically block Cloudflare obfuscation placeholders and dummy emails."""
+        if not isinstance(v, str):
+            return v
+        lower = v.strip().lower()
+        if lower in _BLOCKED_EMAILS:
+            raise ValueError(f"Blocked placeholder email: {v!r}")
+        for domain in _BLOCKED_EMAIL_DOMAINS:
+            if lower.endswith(f"@{domain}") or f"@{domain}" in lower:
+                raise ValueError(f"Blocked Cloudflare domain email: {v!r}")
+        # Only apply prefix check when value looks like an email
+        if "@" in lower:
+            for prefix in _PLACEHOLDER_PREFIXES:
+                if lower.startswith(prefix):
+                    raise ValueError(f"Blocked placeholder-prefix email: {v!r}")
+        return v
 
     @field_validator("tag", mode="before")
     @classmethod
@@ -173,16 +202,21 @@ class ContactInfo(BaseModel):
             v = [v]
         elif not isinstance(v, list):
             return []
-            
+
+        # Known Cloudflare obfuscation placeholder — always reject.
+        _CF_PLACEHOLDER = "[email protected]"
+
         valid_emails = []
         for item in v:
             if not item or not isinstance(item, str):
                 continue
             item = item.strip()
+            if item.lower() == _CF_PLACEHOLDER:
+                continue
             match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", item)
             if match:
                 valid_emails.append(match.group(0).lower())
-                
+
         return list(dict.fromkeys(valid_emails))  # Remove duplicates
 
 class ScrapeResult(BaseModel):
@@ -323,6 +357,17 @@ class WebhookPayload(BaseModel):
     status: str
     message: str
     result: ScrapeResult
+
+# --- PDF Extraction Models ---
+
+class PdfExtractionResult(BaseModel):
+    """Response envelope returned by the synchronous POST /extract-pdf/ endpoint."""
+    filename: str                                          # Original uploaded filename
+    provider: Literal["gemini", "openai"]                 # LLM provider used
+    page_count: int                                        # Number of pages detected
+    extracted_text: str                                    # Full concatenated text
+    processing_time_seconds: float                         # Wall-clock time for the LLM call
+
 
 # --- Database Model ---
 class TaskRecord(SQLModel, table=True):

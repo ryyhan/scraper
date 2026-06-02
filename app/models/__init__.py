@@ -20,4 +20,5 @@ from .models import (
     TaggedContact,
     ContactTag,
     StructuredAddress,
+    PdfExtractionResult,
 )
