@@ -8,7 +8,7 @@ authored in the original openai_search.py module.
 
 import json
 import re
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from openai import OpenAI
 from loguru import logger
