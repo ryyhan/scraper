@@ -12,6 +12,8 @@ from app.models import (
     CombinedSearchRequest,
     CombinedSearchResult,
     CombinedCompanyInfo,
+    CombinedSearchSummary,
+    SourceStats,
     OpenAISearchRequest,
     OpenAISearchResult,
     GeminiSearchRequest,
@@ -38,8 +40,13 @@ class CombinedSearchService:
         max_limit = getattr(request, "max_limit", None)
         logger.info(f"[CombinedSearchService] Starting combined research for: {company_name!r}")
 
-        openai_req = OpenAISearchRequest(**request.model_dump())
-        gemini_req = GeminiSearchRequest(**request.model_dump())
+        # Pass max_limit=None so sub-services return their full uncapped result sets.
+        # The cap is applied once here after deduplication so that the best
+        # max_limit items are selected from the merged pool, not from each source
+        # individually before merging.
+        req_dict = {**request.model_dump(), "max_limit": None}
+        openai_req = OpenAISearchRequest(**req_dict)
+        gemini_req = GeminiSearchRequest(**req_dict)
 
         # Execute both concurrently in threads to prevent blocking
         openai_task = asyncio.to_thread(
@@ -75,11 +82,20 @@ class CombinedSearchService:
         addresses: dict[str, StructuredAddress] = {}
         official_site = ""
 
+        # --- Per-source stats (raw counts before deduplication) ---
+        openai_stats = SourceStats()
+        gemini_stats = SourceStats()
+
         # Process OpenAI Result
         if openai_result:
             if openai_result.official_site:
                 official_site = openai_result.official_site
-            
+
+            openai_stats.total_phones = len([p for p in openai_result.company_info.phones if p])
+            openai_stats.total_faxes = len([f for f in openai_result.company_info.faxes if f])
+            openai_stats.total_emails = len([e for e in openai_result.company_info.emails if e])
+            openai_stats.total_addresses = len([a for a in openai_result.company_info.addresses if a])
+
             for p in openai_result.company_info.phones:
                 if p and p.value not in phones: phones[p.value] = p
             for f in openai_result.company_info.faxes:
@@ -97,7 +113,12 @@ class CombinedSearchService:
         if gemini_result:
             if not official_site and gemini_result.official_site:
                 official_site = gemini_result.official_site
-            
+
+            gemini_stats.total_phones = len([p for p in gemini_result.company_info.phones if p])
+            gemini_stats.total_faxes = len([f for f in gemini_result.company_info.faxes if f])
+            gemini_stats.total_emails = len([e for e in gemini_result.company_info.emails if e])
+            gemini_stats.total_addresses = len([a for a in gemini_result.company_info.addresses if a])
+
             for p in gemini_result.company_info.phones:
                 if p and p.value not in phones: phones[p.value] = p
             for f in gemini_result.company_info.faxes:
@@ -117,18 +138,46 @@ class CombinedSearchService:
         emails_list = sorted(list(emails.values()), key=lambda x: x.value)
         addresses_list = sorted(list(addresses.values()), key=lambda x: f"{x.address1} {x.city} {x.zip}")
 
+        # Apply max_limit cap
+        apply_limit = max_limit is not None and max_limit > 0
+        final_phones = phones_list[:max_limit] if apply_limit else phones_list
+        final_faxes = faxes_list[:max_limit] if apply_limit else faxes_list
+        final_emails = emails_list[:max_limit] if apply_limit else emails_list
+        final_addresses = addresses_list[:max_limit] if apply_limit else addresses_list
+
         company_info = CombinedCompanyInfo(
-            phones=phones_list[:max_limit] if max_limit is not None and max_limit > 0 else phones_list,
-            faxes=faxes_list[:max_limit] if max_limit is not None and max_limit > 0 else faxes_list,
-            emails=emails_list[:max_limit] if max_limit is not None and max_limit > 0 else emails_list,
-            addresses=addresses_list[:max_limit] if max_limit is not None and max_limit > 0 else addresses_list,
+            phones=final_phones,
+            faxes=final_faxes,
+            emails=final_emails,
+            addresses=final_addresses,
         )
 
-        logger.info(f"[CombinedSearchService] Completed combined research for: {company_name!r}")
+        # --- Build summary (combined counts reflect final capped+deduped lists) ---
+        summary = CombinedSearchSummary(
+            openai=openai_stats,
+            gemini=gemini_stats,
+            combined=SourceStats(
+                total_phones=len(final_phones),
+                total_faxes=len(final_faxes),
+                total_emails=len(final_emails),
+                total_addresses=len(final_addresses),
+            ),
+        )
+
+        logger.info(
+            f"[CombinedSearchService] Completed combined research for: {company_name!r} | "
+            f"OpenAI(phones={openai_stats.total_phones}, faxes={openai_stats.total_faxes}, "
+            f"emails={openai_stats.total_emails}, addresses={openai_stats.total_addresses}) | "
+            f"Gemini(phones={gemini_stats.total_phones}, faxes={gemini_stats.total_faxes}, "
+            f"emails={gemini_stats.total_emails}, addresses={gemini_stats.total_addresses}) | "
+            f"Combined(phones={summary.combined.total_phones}, faxes={summary.combined.total_faxes}, "
+            f"emails={summary.combined.total_emails}, addresses={summary.combined.total_addresses})"
+        )
         return CombinedSearchResult(
             company_name=company_name,
             official_site=official_site,
             company_info=company_info,
+            summary=summary,
             openai_result=openai_result,
             gemini_result=gemini_result,
         )

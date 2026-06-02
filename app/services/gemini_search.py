@@ -45,6 +45,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.models import ContactTag
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -59,6 +60,9 @@ Gemini 2.0 Flash supports Google Search grounding, structured JSON output, and
 is fast/cost-efficient.  Swap to ``gemini-1.5-pro`` or ``gemini-2.5-pro`` for
 higher accuracy at greater latency/cost — no other code changes required.
 """
+
+# Dynamically built from the enum — always in sync, no manual maintenance.
+_ALLOWED_TAGS: str = ", ".join(f"'{t.value}'" for t in ContactTag)
 
 
 class GeminiSearchService:
@@ -271,7 +275,8 @@ class GeminiSearchService:
             "STRICT RULES:\n"
             "1. Extract ALL valid emails, phone numbers, fax numbers, and physical "
             "addresses you can find into their respective arrays.\n"
-            "   - For each extracted contact, assign a 'tag' from the following allowed values ONLY: 'Human Resource', 'Payroll', 'Admin', 'Careers', 'Personnel', 'Finance', 'Secretary', 'Labor relations', or 'Others'.\n"
+            f"   - For each extracted contact, assign a 'tag' from the following allowed values ONLY: {_ALLOWED_TAGS}.\n"
+            "   - Pick the tag that best describes the department or purpose of the contact.\n"
             "   - If it is an administrative assistant, tag it as 'Admin'.\n"
             "   - Use 'context' to optionally provide the webpage section or text where it was found (e.g., 'Found on Careers page').\n"
             "2. For addresses, populate the structured fields (address1, address2, city, state, zip, country, countryCode).\n"
@@ -354,9 +359,8 @@ class GeminiSearchService:
             "These are legitimate catch-all addresses commonly used by companies.\n\n"
             "REMOVE a contact if ALL of these conditions are true:\n"
             "  a) Its exact value does NOT appear anywhere in the research text.\n"
-            "  b) It is NOT a generic email as defined above (i.e. it uses a departmental "
-            "prefix such as hr, payroll, finance, careers, secretary, labor that was "
-            "never explicitly found on any source page).\n\n"
+            "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
+            "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
             "- Preserve 'tag', 'context', 'company_name', and 'official_site' fields unchanged.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"

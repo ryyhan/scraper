@@ -15,6 +15,8 @@ from .models import (
     CombinedSearchRequest,
     CombinedCompanyInfo,
     CombinedSearchResult,
+    SourceStats,
+    CombinedSearchSummary,
     TaggedContact,
     ContactTag,
     StructuredAddress,

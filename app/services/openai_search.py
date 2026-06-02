@@ -15,8 +15,12 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.models import ContactTag
 
 T = TypeVar("T", bound=BaseModel)
+
+# Dynamically built from the enum — always in sync, no manual maintenance.
+_ALLOWED_TAGS: str = ", ".join(f"'{t.value}'" for t in ContactTag)
 
 
 class OpenAISearchService:
@@ -36,7 +40,16 @@ class OpenAISearchService:
         api_key = settings.OPENAI_API_KEY
         if not api_key:
             logger.warning("OPENAI_API_KEY is not configured – OpenAI calls will fail.")
-        self._client = OpenAI(api_key=api_key)
+        self._client: OpenAI | None = OpenAI(api_key=api_key) if api_key else None
+
+    def _require_client(self) -> OpenAI:
+        """Return the configured client or raise clearly if no API key was set."""
+        if self._client is None:
+            raise RuntimeError(
+                "OpenAISearchService is not configured: OPENAI_API_KEY is missing. "
+                "Set it in your .env file and restart the server."
+            )
+        return self._client
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,7 +127,7 @@ class OpenAISearchService:
             "- Official social media pages"
         )
 
-        research_response = self._client.responses.create(
+        research_response = self._require_client().responses.create(
             model="gpt-4o-mini",
             tools=[{"type": "web_search"}],
             input=research_prompt,
@@ -128,7 +141,8 @@ class OpenAISearchService:
             "TASK: Extract the info into JSON.\n"
             "STRICT RULES:\n"
             "1. Extract ALL valid emails, phone numbers, fax numbers, and physical addresses you can find into arrays.\n"
-            "   - For each extracted contact, assign a 'tag' from the following allowed values ONLY: 'Human Resource', 'Payroll', 'Admin', 'Careers', 'Personnel', 'Finance', 'Secretary', 'Labor relations', or 'Others'.\n"
+            f"   - For each extracted contact, assign a 'tag' from the following allowed values ONLY: {_ALLOWED_TAGS}.\n"
+            "   - Pick the tag that best describes the department or purpose of the contact.\n"
             "   - If it is an administrative assistant, tag it as 'Admin'.\n"
             "   - Use 'context' to optionally provide the webpage section or text where it was found (e.g., 'Found on Careers page').\n"
             "2. For addresses, populate the structured fields (address1, address2, city, state, zip, country, countryCode).\n"
@@ -138,7 +152,7 @@ class OpenAISearchService:
             "6. EXCLUDE PLACEHOLDERS: Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...'). Only extract real, verified contact emails."
         )
 
-        final_response = self._client.responses.create(
+        final_response = self._require_client().responses.create(
             model="gpt-4o-mini",
             input=extraction_prompt,
             text={"format": {"type": "json_object"}},
@@ -197,9 +211,8 @@ class OpenAISearchService:
             "These are legitimate catch-all addresses commonly used by companies.\n\n"
             "REMOVE a contact if ALL of these conditions are true:\n"
             "  a) Its exact value does NOT appear anywhere in the research text.\n"
-            "  b) It is NOT a generic email as defined above (i.e. it uses a departmental "
-            "prefix such as hr, payroll, finance, careers, secretary, labor that was "
-            "never explicitly found on any source page).\n\n"
+            "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
+            "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
             "- Preserve 'tag', 'context', 'company_name', and 'official_site' unchanged.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
@@ -211,7 +224,7 @@ class OpenAISearchService:
         logger.debug(
             f"[OpenAISearchService] Step 3: verifying extracted contacts for {company_name!r}"
         )
-        verify_response = self._client.responses.create(
+        verify_response = self._require_client().responses.create(
             model="gpt-4o-mini",
             input=verification_prompt,
             text={"format": {"type": "json_object"}},
@@ -232,12 +245,10 @@ class OpenAISearchService:
             return re.sub(r"\s*\(\[.*?\]\(.*?\)\)", "", value).strip()
         return value
 
-    def _clean_dict(self, data: dict) -> dict:
-        """Recursively clean all string values inside *data*."""
-        cleaned: dict = {}
-        for k, v in data.items():
-            if isinstance(v, dict):
-                cleaned[k] = {nk: self._clean_val(nv) for nk, nv in v.items()}
-            else:
-                cleaned[k] = self._clean_val(v)
-        return cleaned
+    def _clean_dict(self, data: Any) -> Any:
+        """Recursively clean all string values inside *data* (handles dicts and lists)."""
+        if isinstance(data, dict):
+            return {k: self._clean_dict(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._clean_dict(item) for item in data]
+        return self._clean_val(data)

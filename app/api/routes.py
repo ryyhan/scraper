@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from loguru import logger
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from sqlmodel import Session, select, desc, String
 
@@ -135,9 +135,13 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 task.status = status
                 task.message = message
                 task.result_data = final_result.model_dump()
-                task.updated_at = datetime.utcnow()
+                task.updated_at = datetime.now(timezone.utc)
                 session.add(task)
                 session.commit()
+            else:
+                logger.error(
+                    f"[task-persist] Task {task_id} not found in DB — result discarded."
+                )
                 
         # --- Send External Webhook ---
         if webhook_url:
@@ -248,9 +252,13 @@ async def _process_openai_search_task(task_id: str, request: OpenAISearchRequest
             task.status = status
             task.message = message
             task.result_data = result_data
-            task.updated_at = datetime.utcnow()
+            task.updated_at = datetime.now(timezone.utc)
             session.add(task)
             session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
 
 
 @router.post("/openai-search/", summary="Search company contact info via OpenAI")
@@ -381,9 +389,13 @@ async def _process_gemini_search_task(task_id: str, request: GeminiSearchRequest
             task.status = status
             task.message = message
             task.result_data = result_data
-            task.updated_at = datetime.utcnow()
+            task.updated_at = datetime.now(timezone.utc)
             session.add(task)
             session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
 
 
 @router.post("/gemini-search/", summary="Search company contact info via Gemini")
@@ -524,9 +536,13 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
             task.status = status
             task.message = message
             task.result_data = result_data
-            task.updated_at = datetime.utcnow()
+            task.updated_at = datetime.now(timezone.utc)
             session.add(task)
             session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
 
 
 @router.post("/verify-voe/", summary="Verify employment of a person via Gemini web research")
@@ -661,9 +677,13 @@ async def _process_combined_search_task(task_id: str, request: CombinedSearchReq
             task.status = status
             task.message = message
             task.result_data = result_data
-            task.updated_at = datetime.utcnow()
+            task.updated_at = datetime.now(timezone.utc)
             session.add(task)
             session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
 
 
 @router.post("/combined-search/", summary="Search company contact info via combined OpenAI and Gemini")
