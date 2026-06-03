@@ -369,7 +369,69 @@ class PdfExtractionResult(BaseModel):
     processing_time_seconds: float                         # Wall-clock time for the LLM call
 
 
+
+# --- Background Check Parser Models ---
+
+class BgCheckFields(BaseModel):
+    """
+    Structured fields extracted from a background check / screening report.
+
+    All fields default to ``""`` when not found in the document so that
+    downstream consumers always receive a consistent flat JSON object.
+    Dates are normalised to ISO 8601 (YYYY-MM-DD) by the extraction prompt.
+    """
+    file_number: str = Field(
+        default="",
+        description="Case / order / reference identifier (e.g. 'BGC-2024-00123').",
+    )
+    employee_name: str = Field(
+        default="",
+        description="Full name of the subject / applicant being screened.",
+    )
+    date_of_birth: str = Field(
+        default="",
+        description="Subject's date of birth in YYYY-MM-DD format, or ''.",
+    )
+    requested_by: str = Field(
+        default="",
+        description="Name or organisation that ordered the background check.",
+    )
+    employer_name: str = Field(
+        default="",
+        description="Employer / client company named on the report.",
+    )
+    position: str = Field(
+        default="",
+        description="Job title or position the applicant is being considered for.",
+    )
+    report_date: str = Field(
+        default="",
+        description="Report generation / order date in YYYY-MM-DD format, or ''.",
+    )
+    status: str = Field(
+        default="",
+        description=(
+            "Overall report status as it appears on the document "
+            "(e.g. 'Clear', 'Consider', 'Adverse Action')."
+        ),
+    )
+
+
+class BgCheckParseResult(BaseModel):
+    """Full response envelope returned by POST /parse-background-check/."""
+    filename: str = Field(description="Original uploaded filename.")
+    provider: Literal["gemini", "openai"] = Field(description="LLM provider used.")
+    processing_time_seconds: float = Field(
+        description="Total wall-clock time for both pipeline stages."
+    )
+    data: BgCheckFields = Field(
+        default_factory=BgCheckFields,
+        description="Extracted structured fields from the background check PDF.",
+    )
+
+
 # --- Database Model ---
+
 class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)
     status: str = Field(default="PENDING")  # PENDING, IN_PROGRESS, SUCCESS, FAILURE

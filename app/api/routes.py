@@ -13,12 +13,14 @@ from app.models import GeminiSearchRequest, GeminiSearchResult
 from app.models import VoeRequest, VoeVerificationResult
 from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.models import PdfExtractionResult
+from app.models import BgCheckFields, BgCheckParseResult
 from app.api.deps import get_session
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
 from app.services import VoeVerificationService
 from app.services import CombinedSearchService
 from app.services import PdfExtractorService
+from app.services import BgCheckParserService
 from app.core.config import settings
 
 router = APIRouter()
@@ -889,4 +891,128 @@ async def extract_pdf(
         page_count=page_count,
         extracted_text=extracted_text,
         processing_time_seconds=elapsed,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background Check PDF Parser Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/parse-background-check/",
+    response_model=BgCheckParseResult,
+    summary="Parse a background check PDF and extract structured fields",
+    tags=["PDF Extraction"],
+)
+async def parse_background_check(
+    file: UploadFile = File(
+        ...,
+        description="Background check / screening report PDF (max 20 MB).",
+    ),
+    provider: Literal["gemini", "openai"] = Form(
+        default="gemini",
+        description="Vision LLM provider: 'gemini' (default) or 'openai'.",
+    ),
+) -> BgCheckParseResult:
+    """
+    Extract structured fields from a background check / screening report PDF.
+
+    Supports reports from **HireRight**, **Sterling**, **Checkr**,
+    **Accurate**, **First Advantage**, and similar vendors.
+
+    **Two-stage pipeline:**
+    1. **Raw extraction** — the full PDF is processed by the selected vision
+       LLM (Gemini Files API or OpenAI gpt-4o-mini) to obtain complete text.
+    2. **Field extraction** — a focused, structured LLM call identifies the
+       7 target fields from the raw text using vendor-agnostic label synonyms.
+
+    **Fields returned** (all fields default to `""` if not found):
+    - `file_number` — Case / order / reference ID
+    - `employee_name` — Full name of the subject / applicant
+    - `date_of_birth` — Subject's DOB (normalised to YYYY-MM-DD)
+    - `requested_by` — Requester name or organisation
+    - `employer_name` — Employer / client company
+    - `position` — Job title / position applied for
+    - `report_date` — Report date (normalised to YYYY-MM-DD)
+    - `status` — Overall status (e.g. Clear, Consider, Adverse Action)
+
+    **Providers:**
+    - `gemini` (default) — uses Gemini Files API + native JSON schema output.
+      Requires `GEMINI_API_KEY`.
+    - `openai` — renders pages via `pypdfium2` + `gpt-4o-mini` vision.
+      Requires `OPENAI_API_KEY`.
+
+    **Constraints:**
+    - File must be a valid PDF (`.pdf` extension + `%PDF` magic bytes).
+    - Maximum file size: `PDF_MAX_FILE_SIZE_MB` MB (default 20 MB).
+    """
+    # ── 1. Read bytes eagerly ────────────────────────────────────────────────────
+    pdf_bytes = await file.read()
+    filename = file.filename or "upload.pdf"
+
+    # ── 2. Validate: extension, size, magic bytes ────────────────────────────
+    try:
+        PdfExtractorService.validate(pdf_bytes, filename)
+    except ValueError as exc:
+        status_code = 413 if "too large" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+    # ── 3. Fail fast if the requested provider key is missing ──────────────
+    if provider == "gemini" and not settings.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GEMINI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+    if provider == "openai" and not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "OPENAI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+
+    # ── 4. Run two-stage pipeline in a thread (both SDKs are synchronous) ───
+    logger.info(
+        f"[parse-background-check] Starting: file={filename!r}, "
+        f"size={len(pdf_bytes) / 1024:.1f} KB, provider={provider!r}"
+    )
+
+    service = BgCheckParserService()
+    t0 = time.perf_counter()
+
+    try:
+        fields_dict: dict = await asyncio.to_thread(
+            service.parse,
+            pdf_bytes,
+            filename,
+            provider,
+        )
+    except RuntimeError as exc:
+        # Missing API key or pypdfium2 not installed
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(
+            f"[parse-background-check] Unhandled error for file={filename!r}: {exc}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Background check parsing failed: {exc}",
+        )
+
+    elapsed = round(time.perf_counter() - t0, 3)
+    logger.info(
+        f"[parse-background-check] Done: file={filename!r}, elapsed={elapsed}s, "
+        f"employee={fields_dict.get('employee_name', '')!r}, "
+        f"status={fields_dict.get('status', '')!r}"
+    )
+
+    return BgCheckParseResult(
+        filename=filename,
+        provider=provider,
+        processing_time_seconds=elapsed,
+        data=BgCheckFields(**fields_dict),
     )

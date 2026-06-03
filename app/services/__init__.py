@@ -6,3 +6,4 @@ from .gemini_search import GeminiSearchService
 from .voe_verification import VoeVerificationService
 from .combined_search import CombinedSearchService
 from .pdf_extractor import PdfExtractorService
+from .bg_check_parser import BgCheckParserService
