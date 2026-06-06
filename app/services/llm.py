@@ -160,7 +160,12 @@ class LLMService:
                 found_emails = []
                 
             if found_emails:
-                current_info.Email.extend([e for e in found_emails if isinstance(e, str) and e.strip()])
+                # Reassign (not .extend) so Pydantic's validate_assignment fires the
+                # validate_email validator on the new values, rejecting any hallucinated
+                # or malformed addresses the LLM may have returned.
+                current_info.Email = current_info.Email + [
+                    e for e in found_emails if isinstance(e, str) and e.strip()
+                ]
                 logger.info(f"Fallback search found missing email(s): {found_emails}")
                 
             return current_info

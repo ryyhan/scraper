@@ -5,6 +5,7 @@ Executes both OpenAI and Gemini search pipelines concurrently and aggregates the
 """
 
 import asyncio
+import re
 from loguru import logger
 from typing import Optional
 
@@ -97,9 +98,13 @@ class CombinedSearchService:
             openai_stats.total_addresses = len([a for a in openai_result.company_info.addresses if a])
 
             for p in openai_result.company_info.phones:
-                if p and p.value not in phones: phones[p.value] = p
+                if p:
+                    key = re.sub(r"\D", "", p.value)  # normalize to digits for dedup
+                    if key not in phones: phones[key] = p
             for f in openai_result.company_info.faxes:
-                if f and f.value not in faxes: faxes[f.value] = f
+                if f:
+                    key = re.sub(r"\D", "", f.value)
+                    if key not in faxes: faxes[key] = f
             for e in openai_result.company_info.emails:
                 if e:
                     e_val = e.value.lower()
@@ -120,9 +125,13 @@ class CombinedSearchService:
             gemini_stats.total_addresses = len([a for a in gemini_result.company_info.addresses if a])
 
             for p in gemini_result.company_info.phones:
-                if p and p.value not in phones: phones[p.value] = p
+                if p:
+                    key = re.sub(r"\D", "", p.value)
+                    if key not in phones: phones[key] = p
             for f in gemini_result.company_info.faxes:
-                if f and f.value not in faxes: faxes[f.value] = f
+                if f:
+                    key = re.sub(r"\D", "", f.value)
+                    if key not in faxes: faxes[key] = f
             for e in gemini_result.company_info.emails:
                 if e:
                     e_val = e.value.lower()

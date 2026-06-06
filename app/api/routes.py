@@ -115,13 +115,15 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 if final_result.poe_info is None and combined_text:
                     import re
                     from app.models import ContactInfo
-                    emails = set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', combined_text))
+                    from app.models.models import _EMAIL_REGEX  # reuse authoritative validator
+                    _CF_PLACEHOLDER = "[email protected]"
+                    raw_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', combined_text)
                     invalid_domains = ['.png', '.jpg', '.jpeg', '.gif', '.css', '.js', 'sentry', 'example', 'domain.com', '.webp', 'wixpress']
-                    # Always strip the Cloudflare email-obfuscation placeholder
-                    cf_placeholder = '[email protected]'
                     valid_emails = [
-                        e for e in emails
-                        if e.lower() != cf_placeholder and not any(bad in e.lower() for bad in invalid_domains)
+                        e for e in set(raw_emails)
+                        if e.lower() != _CF_PLACEHOLDER
+                        and not any(bad in e.lower() for bad in invalid_domains)
+                        and _EMAIL_REGEX.match(e)  # enforce full format validation
                     ]
                     if valid_emails:
                         logger.info(f"Task {task_id}: Extracted valid email from partial text post-timeout.")
@@ -308,7 +310,7 @@ async def get_failed_openai_tasks(
     statement = (
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
-        .where(TaskRecord.message.contains("OpenAI") | TaskRecord.result_data.cast(String).contains("company_name"))  # type: ignore[union-attr]
+        .where(TaskRecord.message.contains("OpenAI"))  # type: ignore[union-attr]
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
     )
@@ -450,7 +452,6 @@ async def get_failed_gemini_tasks(
         .where(TaskRecord.status == "FAILURE")
         .where(
             TaskRecord.message.contains("Gemini")  # type: ignore[union-attr]
-            | TaskRecord.result_data.cast(String).contains("company_name")  # type: ignore[union-attr]
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -596,7 +597,7 @@ async def get_failed_voe_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            TaskRecord.result_data.cast(String).contains("full_name")  # type: ignore[union-attr]
+            TaskRecord.message.contains("verification")  # type: ignore[union-attr]
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -737,7 +738,6 @@ async def get_failed_combined_tasks(
         .where(TaskRecord.status == "FAILURE")
         .where(
             TaskRecord.message.contains("combined")  # type: ignore[union-attr]
-            | TaskRecord.result_data.cast(String).contains("company_name")  # type: ignore[union-attr]
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)

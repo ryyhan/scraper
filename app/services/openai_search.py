@@ -22,6 +22,11 @@ T = TypeVar("T", bound=BaseModel)
 # Dynamically built from the enum — always in sync, no manual maintenance.
 _ALLOWED_TAGS: str = ", ".join(f"'{t.value}'" for t in ContactTag)
 
+_OPENAI_MODEL: str = "gpt-4o-mini"
+"""OpenAI model used for all research, extraction, and verification calls.
+Swap to 'gpt-4o' or 'o3' for higher accuracy — no other code changes required.
+"""
+
 
 class OpenAISearchService:
     """
@@ -128,7 +133,7 @@ class OpenAISearchService:
         )
 
         research_response = self._require_client().responses.create(
-            model="gpt-4o-mini",
+            model=_OPENAI_MODEL,
             tools=[{"type": "web_search"}],
             input=research_prompt,
         )
@@ -153,7 +158,7 @@ class OpenAISearchService:
         )
 
         final_response = self._require_client().responses.create(
-            model="gpt-4o-mini",
+            model=_OPENAI_MODEL,
             input=extraction_prompt,
             text={"format": {"type": "json_object"}},
         )
@@ -218,29 +223,39 @@ class OpenAISearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', and 'official_site' unchanged.\n\n"
+            "- Preserve 'tag', 'context', 'company_name', and 'official_site' unchanged.\n"
+            "- IMPORTANT: Return ONLY the filtered data values in the EXACT SAME JSON structure "
+            "as EXTRACTED CONTACTS below. Do NOT return a schema or type definition.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
             f"EXTRACTED CONTACTS:\n{extracted_json}\n\n"
-            f"Return the filtered result as a VALID JSON object matching this schema:\n"
-            f"{json.dumps(model_class.model_json_schema(), indent=2)}"
+            "Return the filtered result as a JSON object with the same keys and structure as EXTRACTED CONTACTS above."
         )
 
         logger.debug(
             f"[OpenAISearchService] Step 3: verifying extracted contacts for {company_name!r}"
         )
         verify_response = self._require_client().responses.create(
-            model="gpt-4o-mini",
+            model=_OPENAI_MODEL,
             input=verification_prompt,
             text={"format": {"type": "json_object"}},
         )
 
         data = json.loads(verify_response.output_text)
         cleaned_data = self._clean_dict(data)
-        verified = model_class.model_validate(cleaned_data)
-        logger.debug(
-            f"[OpenAISearchService] Step 3: verification complete for {company_name!r}"
-        )
-        return verified
+        try:
+            verified = model_class.model_validate(cleaned_data)
+            logger.debug(
+                f"[OpenAISearchService] Step 3: verification complete for {company_name!r}"
+            )
+            return verified
+        except Exception as exc:
+            # If the LLM returned a schema definition or garbage, fall back to the
+            # pre-verification result rather than crashing the whole pipeline.
+            logger.warning(
+                f"[OpenAISearchService] Step 3: verification parse failed ({exc}); "
+                f"returning pre-verification result for {company_name!r}"
+            )
+            return extracted
 
     @staticmethod
     def _clean_val(value: object) -> object:

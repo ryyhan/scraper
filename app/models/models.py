@@ -114,6 +114,16 @@ _BLOCKED_EMAIL_DOMAINS: tuple[str, ...] = ("cloudflare.com",)
 _PLACEHOLDER_PREFIXES: tuple[str, ...] = (
     "email@", "example@", "name@", "abc@", "user@", "test@", "noreply@",
 )
+# Compiled once at module level for efficiency.
+# Domain part requires proper labels (alphanumeric + hyphens) separated by single dots.
+# This rejects patterns like "name@...com" or "user@foo..bar.com".
+_EMAIL_REGEX = re.compile(
+    r"^[a-zA-Z0-9_.+\-]+"           # local part
+    r"@"
+    r"[a-zA-Z0-9]"                   # domain: must start with alphanumeric
+    r"([a-zA-Z0-9\-]*[a-zA-Z0-9])?" # domain: optional middle chars (no leading/trailing hyphen)
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$"  # one or more .label segments
+)
 
 
 class TaggedContact(BaseModel):
@@ -124,21 +134,41 @@ class TaggedContact(BaseModel):
     @field_validator("value", mode="before")
     @classmethod
     def reject_placeholder_emails(cls, v: Any) -> Any:
-        """Deterministically block Cloudflare obfuscation placeholders and dummy emails."""
+        """Validate email format and block Cloudflare obfuscation placeholders and dummy emails.
+
+        NOTE: TaggedContact is shared by phones, faxes, and emails.
+        Email-format checks are only applied when the value contains '@'.
+        Phone/fax values (no '@') are passed through untouched.
+        """
         if not isinstance(v, str):
             return v
-        lower = v.strip().lower()
+        stripped = v.strip()
+        lower = stripped.lower()
+
+        # --- Not an email (phone/fax/etc.) — skip all email checks ---
+        if "@" not in lower:
+            return stripped
+
+        # --- Step 1: Must be a valid email address format ---
+        # Rejects hallucinations like "contact form on website" or "name@...com"
+        if not _EMAIL_REGEX.match(stripped):
+            raise ValueError(f"Not a valid email address format: {v!r}")
+
+        # --- Step 2: Block known Cloudflare obfuscation placeholders ---
         if lower in _BLOCKED_EMAILS:
             raise ValueError(f"Blocked placeholder email: {v!r}")
+
+        # --- Step 3: Block known bad domains ---
         for domain in _BLOCKED_EMAIL_DOMAINS:
             if lower.endswith(f"@{domain}") or f"@{domain}" in lower:
                 raise ValueError(f"Blocked Cloudflare domain email: {v!r}")
-        # Only apply prefix check when value looks like an email
-        if "@" in lower:
-            for prefix in _PLACEHOLDER_PREFIXES:
-                if lower.startswith(prefix):
-                    raise ValueError(f"Blocked placeholder-prefix email: {v!r}")
-        return v
+
+        # --- Step 4: Block placeholder-style prefixes ---
+        for prefix in _PLACEHOLDER_PREFIXES:
+            if lower.startswith(prefix):
+                raise ValueError(f"Blocked placeholder-prefix email: {v!r}")
+
+        return stripped
 
     @field_validator("tag", mode="before")
     @classmethod
@@ -213,9 +243,10 @@ class ContactInfo(BaseModel):
             item = item.strip()
             if item.lower() == _CF_PLACEHOLDER:
                 continue
-            match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", item)
-            if match:
-                valid_emails.append(match.group(0).lower())
+            # Use the same authoritative regex as TaggedContact — rejects
+            # formats like "contact form on website", "name@...com", etc.
+            if _EMAIL_REGEX.match(item):
+                valid_emails.append(item.lower())
 
         return list(dict.fromkeys(valid_emails))  # Remove duplicates
 

@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import List, Optional
 from urllib.parse import urljoin
 from playwright.async_api import async_playwright, Error as PlaywrightError
@@ -6,6 +7,7 @@ from loguru import logger
 from playwright_stealth import Stealth
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.core.config import settings
+from app.models.models import _EMAIL_REGEX  # reuse the authoritative validator
 
 class ScraperService:
     """
@@ -347,10 +349,16 @@ class ScraperService:
             raw_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html_content)
             
             found_emails = set(mailto_matches + raw_emails)
-            # Filter out common false-positives (images masquerading as emails, sentry trackers, fake placeholders)
+            # Filter out common false-positives and obfuscated/malformed addresses.
+            _CF_PLACEHOLDER = "[email protected]"
             invalid_domains = ['.png', '.jpg', '.jpeg', '.gif', '.css', '.js', 'sentry', 'example', 'domain.com', '.webp', 'wixpress']
-            valid_emails = [e for e in found_emails if not any(bad in e.lower() for bad in invalid_domains)]
-            
+            valid_emails = [
+                e for e in found_emails
+                if e.lower() != _CF_PLACEHOLDER                        # Cloudflare placeholder
+                and not any(bad in e.lower() for bad in invalid_domains)  # image/tracker domains
+                and _EMAIL_REGEX.match(e)                               # must be a valid email format
+            ]
+
             if valid_emails:
                 logger.info(f"Regex found {len(valid_emails)} hidden emails in raw HTML on {url}")
                 # Append them forcefully to the bottom of the visible text so the LLM is guaranteed to see them
