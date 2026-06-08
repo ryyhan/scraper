@@ -337,7 +337,7 @@ class VoeVerificationResult(BaseModel):
 class CombinedSearchRequest(BaseModel):
     """Request body for the POST /combined-search/ endpoint."""
     company_name: str
-    country: Optional[str] = None
+    country: Optional[str] = "United States"
     zip_code: Optional[str] = None
     url: Optional[str] = None
     max_limit: Optional[int] = None
