@@ -22,9 +22,9 @@ T = TypeVar("T", bound=BaseModel)
 # Dynamically built from the enum — always in sync, no manual maintenance.
 _ALLOWED_TAGS: str = ", ".join(f"'{t.value}'" for t in ContactTag)
 
-_OPENAI_MODEL: str = "gpt-4o-mini"
+_OPENAI_MODEL: str = settings.OPENAI_MODEL
 """OpenAI model used for all research, extraction, and verification calls.
-Swap to 'gpt-4o' or 'o3' for higher accuracy — no other code changes required.
+Override via OPENAI_MODEL in your .env file (e.g. OPENAI_MODEL=gpt-4o).
 """
 
 

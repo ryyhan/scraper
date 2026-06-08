@@ -41,7 +41,7 @@ class LLMService:
                     {"role": "system", "content": "You are a helpful assistant that identifies official company websites."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=settings.GROQ_MODEL,
                 temperature=0,
             )
             result = chat_completion.choices[0].message.content.strip()
@@ -90,7 +90,7 @@ class LLMService:
                     {"role": "system", "content": "You are a data extraction assistant. Output valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=settings.GROQ_MODEL,
                 temperature=0,
                 max_tokens=8000,
                 response_format={"type": "json_object"}
@@ -145,7 +145,7 @@ class LLMService:
                     {"role": "system", "content": "You extract email addresses from text. Output valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama-3.1-8b-instant",
+                model=settings.GROQ_MODEL,
                 temperature=0,
                 max_tokens=8000,
                 response_format={"type": "json_object"}

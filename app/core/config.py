@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_BROWSERS: int = 4
     PDF_MAX_FILE_SIZE_MB: int = 20  # Maximum PDF upload size for /extract-pdf/
 
-    
+    # LLM model names — override via .env to switch models without code changes.
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+
     # Loads .env file
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True)
 

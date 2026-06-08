@@ -53,12 +53,9 @@ T = TypeVar("T", bound=BaseModel)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL: str = "gemini-2.5-flash-lite"
-"""Default model used for both research and extraction calls.
-
-Gemini 2.0 Flash supports Google Search grounding, structured JSON output, and
-is fast/cost-efficient.  Swap to ``gemini-1.5-pro`` or ``gemini-2.5-pro`` for
-higher accuracy at greater latency/cost — no other code changes required.
+_GEMINI_MODEL: str = settings.GEMINI_MODEL
+"""Gemini model used for all research, extraction, and verification calls.
+Override via GEMINI_MODEL in your .env file (e.g. GEMINI_MODEL=gemini-2.5-pro).
 """
 
 # Dynamically built from the enum — always in sync, no manual maintenance.
