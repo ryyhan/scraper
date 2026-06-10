@@ -52,22 +52,73 @@ from app.core.config import settings
 # Constants
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL = settings.GEMINI_MODEL
-_OPENAI_MODEL_SHORT = settings.OPENAI_MODEL   # ≤ 10 pages
-_OPENAI_MODEL_LONG = settings.OPENAI_MODEL    # > 10 pages (same model, preserved for easy swap)
+_GEMINI_MODEL = settings.GEMINI_OCR_MODEL
+_OPENAI_MODEL_SHORT = settings.OPENAI_OCR_MODEL   # ≤ 10 pages
+_OPENAI_MODEL_LONG = settings.OPENAI_OCR_MODEL    # > 10 pages (same model, preserved for easy swap)
 _MAX_PAGES_FULL_MODEL = 10            # threshold above which we switch to the cheaper model
 
 _RENDER_DPI = 150        # 150 DPI balances OCR quality vs. payload size
 _JPEG_QUALITY = 85       # JPEG quality for OpenAI image encoding
 
-_EXTRACTION_PROMPT = (
-    "You are an expert document reader. "
-    "Extract ALL text from this PDF document exactly as it appears, "
-    "preserving the natural reading order and page structure. "
-    "Separate pages with the marker: '--- Page N ---' (where N is the page number). "
-    "Do NOT summarise, paraphrase, or omit any content. "
-    "Return only the extracted text — no commentary."
-)
+_EXTRACTION_PROMPT = """\
+You are an expert document reader specialised in processing background-check \
+and HR screening forms, including scanned and handwritten documents.
+
+Your task is to extract the COMPLETE content of this document and render it \
+as plain text that perfectly represents what a human reader would understand \
+from the page — including all visual selection cues.
+
+GENERAL RULES
+─────────────
+• Preserve natural reading order and page structure.
+• Separate pages with the exact marker:  --- Page N ---  (N = page number).
+• Do NOT summarise, paraphrase, or omit any content.
+• Return ONLY the extracted text — no commentary, no markdown fences.
+
+VISUAL SELECTION CUES (critical for forms and checkboxes)
+─────────────────────────────────────────────────────────
+Many fields in these documents are answered by marking a checkbox, bubble, or
+option rather than writing text. You MUST detect and faithfully transcribe
+every such mark using the notation below.
+
+Detection guidance — treat the following as a SELECTED mark:
+  • A tick / check-mark  (✓, ✔, or any hand-drawn check)
+  • An X or cross        (✗, ×, or any hand-drawn X)
+  • A filled or shaded circle / bubble
+  • A circled option     (when a word or box is ringed/circled by hand)
+  • A scribble, shade, or heavy pen stroke inside or over a box/option
+  • An underline beneath a specific option (when used as selection)
+
+Treat the following as NOT SELECTED:
+  • An empty box  □  or empty circle  ○
+  • An option with no mark near it
+
+Transcription notation — inline with the surrounding text:
+  • For a checkbox:
+      Marked   → append  [SELECTED]   immediately after the option label
+      Unmarked → append  [NOT SELECTED]
+  • For a multiple-choice row (where one of several options is circled/ticked):
+      Write all options in order; append [SELECTED] to the chosen one only.
+
+EXAMPLES
+────────
+Checkbox:
+  [ ] Full-time  [✓] Part-time  [ ] Contract
+  →  Full-time [NOT SELECTED]  Part-time [SELECTED]  Contract [NOT SELECTED]
+
+Multiple-choice (circled answer):
+  Employment Status:  Employed  Self-employed  Unemployed  (where "Employed" is circled)
+  →  Employment Status: Employed [SELECTED]  Self-employed [NOT SELECTED]  Unemployed [NOT SELECTED]
+
+Filled bubble (scantron-style):
+  ● Yes  ○ No
+  →  Yes [SELECTED]  No [NOT SELECTED]
+
+If a box or option is ambiguous (e.g., a very faint mark or a stray pen stroke
+that does not clearly indicate intent), append  [UNCLEAR]  instead of guessing.
+
+Now extract the full document text following all rules above.\
+"""
 
 # ---------------------------------------------------------------------------
 # Retry helpers

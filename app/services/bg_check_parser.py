@@ -134,6 +134,26 @@ FIELD DEFINITIONS AND LABEL SYNONYMS
    – Return the value exactly as it appears (e.g., "Clear", "Consider",
      "Adverse Action", "Complete", "Meets Standards", "Review", "Pending").
 
+VISUAL SELECTION NOTATION (produced by the OCR stage)
+──────────────────────────────────────────────────────
+The raw text above may contain inline tags that capture visual marks made on
+the form (ticks, crosses, circles, scribbles, filled bubbles, etc.).
+
+  [SELECTED]     – the preceding option was visually marked / chosen
+  [NOT SELECTED] – the preceding option was present but left blank
+  [UNCLEAR]      – the mark was ambiguous; do not infer intent
+
+When resolving any field whose value is determined by one of these marks:
+• Use the label immediately BEFORE [SELECTED] as the field value.
+• Ignore all labels that are followed by [NOT SELECTED] or [UNCLEAR].
+• If multiple options carry [SELECTED] and the field is normally single-value,
+  return a comma-separated list of the selected labels.
+• If every option carries [UNCLEAR] or no [SELECTED] exists, return "".
+
+Example — employment status field in the raw text:
+  "Employment Status: Full-time [NOT SELECTED]  Part-time [SELECTED]  Contract [NOT SELECTED]"
+  → status field value = "Part-time"
+
 RULES:
 - Return ONLY the JSON object — no explanation, no markdown fences.
 - If a field cannot be found anywhere in the document, return "" for that key.
@@ -153,6 +173,7 @@ REQUIRED OUTPUT FORMAT (example):
   "status": "Clear"
 }}
 """
+
 
 # ---------------------------------------------------------------------------
 # Retry helpers (reuse same strategy as pdf_extractor.py)

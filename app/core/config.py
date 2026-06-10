@@ -14,7 +14,9 @@ class Settings(BaseSettings):
 
     # LLM model names — override via .env to switch models without code changes.
     OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_OCR_MODEL: str = "gpt-4o-mini"  # Model used for PDF vision/OCR processing
     GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+    GEMINI_OCR_MODEL: str = "gemini-2.5-flash-lite"  # Model used for PDF native/Files API OCR processing
     GROQ_MODEL: str = "llama-3.1-8b-instant"
 
     # Loads .env file
