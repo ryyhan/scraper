@@ -110,7 +110,23 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
 _BLOCKED_EMAILS: set[str] = {
     "[email protected]",
 }
-_BLOCKED_EMAIL_DOMAINS: tuple[str, ...] = ("cloudflare.com",)
+_BLOCKED_EMAIL_DOMAINS: tuple[str, ...] = (
+    # Cloudflare obfuscation
+    "cloudflare.com",
+    # IANA reserved / RFC 2606 example domains — never real company contacts
+    "example.com",
+    "example.org",
+    "example.net",
+    "example.edu",
+    # Common LLM-fabricated placeholder domains
+    "test.com",
+    "placeholder.com",
+    "domain.com",
+    "company.com",
+    "yourdomain.com",
+    "yourcompany.com",
+    "acme.com",
+)
 _PLACEHOLDER_PREFIXES: tuple[str, ...] = (
     "email@", "example@", "name@", "abc@", "user@", "test@", "noreply@",
 )

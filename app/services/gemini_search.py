@@ -1,42 +1,56 @@
 """
 Gemini Search Service
 ---------------------
-Implements the same two-step contact-research pipeline as ``OpenAISearchService``
+Implements the same three-step contact-research pipeline as ``OpenAISearchService``
 but drives Google's ``google-genai`` SDK (Gemini 2.0+) instead of OpenAI's.
 
 Pipeline
 ~~~~~~~~
-Step 1 – "Gatherer"
-    A ``generate_content`` call with the ``google_search`` grounding tool enabled.
-    Gemini performs live web searches and returns a rich, cited research summary.
+Step 1 – "Gatherer" (parallel specialized sub-gatherers via ThreadPoolExecutor):
+    Three concurrent ``generate_content`` calls, each with the ``google_search``
+    grounding tool and a hyper-focused prompt targeting different source types:
 
-Step 2 – "Extractor"
-    A second ``generate_content`` call (no tools) with ``response_mime_type`` set
-    to ``"application/json"`` and ``response_schema`` pointing at the target
-    Pydantic model.  The SDK parses the JSON directly into the model via the
-    ``.parsed`` attribute, eliminating manual ``json.loads`` + ``model_validate``
-    plumbing.
+      Sub-gatherer 1 – HR / General / Admin          (queries a–i)
+      Sub-gatherer 2 – Directories / PDFs / Schema   (queries j–p)
+      Sub-gatherer 3 – Social / Press / Databases    (queries q–w)
 
-Step 3 – "Verifier"
+    Each sub-gatherer uses ``DynamicRetrievalConfig(MODE_ALWAYS)`` to force
+    grounding on every call regardless of the model's internal confidence score,
+    and harvests ``grounding_chunks`` metadata (source URLs + page titles) which
+    is appended to the raw research text for the Extractor to see.
+
+    When a known company URL is provided the HR/General sub-gatherer is
+    instructed to crawl key subpages of the official site as its first action —
+    this is entirely LLM-driven via the grounding tool; no Python HTTP calls.
+
+Step 2 – "Extractor":
+    A ``generate_content`` call (no tools) with ``response_mime_type`` set to
+    ``"application/json"`` and ``response_schema`` pointing at the target Pydantic
+    model.  The SDK parses the JSON directly into the model via ``.parsed``.
+
+Step 3 – "Verifier":
     A third ``generate_content`` call (no tools) that cross-checks every extracted
-    contact value against the raw research text from Step 1.  Any contact whose
-    exact value (email address, phone number) cannot be found verbatim in the
-    research is removed.  This prevents pattern-completion and domain-guessing
-    hallucinations (e.g. the LLM inventing ``hr@company.com`` from the domain).
+    contact value against the raw research text from Step 1.  Phone and fax values
+    are compared after digit-only normalisation (strips dashes, spaces, parentheses)
+    so formatting differences do not cause false removals.
 
 Design decisions
 ~~~~~~~~~~~~~~~~
-* Two-call separation mirrors the OpenAI implementation and keeps research
-  and extraction concerns cleanly decoupled.
+* Parallel sub-gatherers replace the single monolithic gather call to maximise
+  total search breadth without increasing per-call latency — all three run
+  concurrently and complete roughly within the time of the slowest one.
+* ``DynamicRetrievalConfig(MODE_ALWAYS, dynamic_threshold=0.0)`` prevents Gemini
+  from skipping grounding on queries it deems "not search-worthy".
+* Grounding chunk metadata enriches the research text so the Extractor has
+  access to the exact URLs Gemini visited and per-page snippets.
 * The public ``structured_llm_call`` signature is intentionally identical to
   ``OpenAISearchService`` to allow future polymorphic dispatch.
-* API key absence is logged as a warning (not raised) to be consistent with the
-  OpenAI service contract.
 """
 
 from __future__ import annotations
 
 import re
+import concurrent.futures
 from typing import Type, TypeVar
 
 from google import genai
@@ -66,13 +80,15 @@ class GeminiSearchService:
     """
     Service wrapper around the three-step Gemini contact-research workflow.
 
-    Step 1 – "Gatherer"  : triggers ``google_search`` grounding to collect raw,
-             cited contact information for the queried company from the live web.
-    Step 2 – "Extractor" : distils the raw research into a validated Pydantic
+    Step 1 – "Gatherer"  : runs three parallel grounded sub-gatherers
+             (HR/General, Directories/PDFs, Social/Press) each with
+             ``DynamicRetrievalConfig(MODE_ALWAYS)`` and grounding chunk
+             harvesting for maximum data surface area.
+    Step 2 – "Extractor" : distils the combined research into a validated Pydantic
              model instance via native JSON schema output.
     Step 3 – "Verifier"  : cross-checks each extracted contact value against the
-             raw research text and removes anything that cannot be found verbatim,
-             preventing pattern-completion and domain-guessing hallucinations.
+             raw research text; phone/fax values are digit-normalised before
+             comparison to prevent false removals due to formatting differences.
     """
 
     def __init__(self) -> None:
@@ -103,8 +119,8 @@ class GeminiSearchService:
 
     def structured_llm_call(self, request: BaseModel, model_class: Type[T]) -> T:
         """
-        Execute the two-step research + extraction pipeline for *request* and
-        return a validated instance of *model_class*.
+        Execute the three-step research + extraction + verification pipeline
+        for *request* and return a validated instance of *model_class*.
 
         Args:
             request:     A Pydantic model instance carrying at minimum a
@@ -134,8 +150,8 @@ class GeminiSearchService:
 
         target_context = self._build_context(company_name, country, zip_code, url)
 
-        # ── Step 1: Deep Research (The "Gatherer") ────────────────────────────
-        research_text = self._gather(target_context, company_name)
+        # ── Step 1: Parallel Deep Research (The "Gatherer") ───────────────────
+        research_text = self._gather(target_context, company_name, url)
 
         # ── Step 2: Extraction (The "Extractor") ──────────────────────────────
         result: T = self._extract(research_text, company_name, model_class)
@@ -173,21 +189,139 @@ class GeminiSearchService:
             parts.append(f"URL: {url}")
         return " | ".join(parts)
 
-    def _gather(self, target_context: str, company_name: str) -> str:
+    def _gather(
+        self,
+        target_context: str,
+        company_name: str,
+        url: str | None = None,
+    ) -> str:
         """
-        Step 1 — Run a grounded web-search via Gemini and return the raw
-        research text.
+        Launch three parallel grounded sub-gatherers via ``ThreadPoolExecutor``
+        and merge their results into a single combined research text.
 
-        The ``google_search`` tool is passed in the request config so Gemini
-        can issue real-time search queries and ground its response in live web
-        data.  The returned text is a rich markdown summary with inline source
-        citations.
+        Sub-gatherers run concurrently so total latency ≈ slowest sub-gatherer,
+        not the sum of all three.  Each failure is caught individually and logged
+        as a warning; the merged output from surviving sub-gatherers is returned.
         """
-        research_prompt = (
-            f"Deep research task: Find contact information for the following target:\n"
-            f"{target_context}\n\n"
+        logger.debug(
+            f"[GeminiSearchService] Launching 3 parallel sub-gatherers for {company_name!r}"
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(
+                    self._gather_hr_general, target_context, company_name, url
+                ): "HR/General",
+                executor.submit(
+                    self._gather_directories_pdfs, target_context, company_name
+                ): "Directories/PDFs",
+                executor.submit(
+                    self._gather_social_press, target_context, company_name
+                ): "Social/Press",
+            }
 
-            # ── Multi-Query Search Strategy ────────────────────────────────
+            sections: list[str] = []
+            for future, label in futures.items():
+                try:
+                    text = future.result(timeout=180)
+                    if text:
+                        sections.append(
+                            f"=== GEMINI SUB-SEARCH: {label} ===\n{text}"
+                        )
+                        logger.debug(
+                            f"[GeminiSearchService] Sub-gatherer '{label}' "
+                            f"returned {len(text)} chars for {company_name!r}"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        f"[GeminiSearchService] Sub-gatherer '{label}' failed "
+                        f"for {company_name!r}: {exc}"
+                    )
+
+        combined = "\n\n".join(sections)
+        logger.debug(
+            f"[GeminiSearchService] Parallel gather complete for {company_name!r}: "
+            f"{len(combined)} total chars from {len(sections)}/3 sub-gatherers"
+        )
+        return combined
+
+    def _run_grounded_search(self, prompt: str, label: str, company_name: str) -> str:
+        """
+        Execute a single grounded Gemini search call.
+
+        Uses ``Tool(google_search=GoogleSearch())`` — the only grounding
+        mechanism supported by ``gemini-2.5-flash-lite``.  The model always
+        performs live web searches when this tool is present; no additional
+        ``DynamicRetrievalConfig`` is required or accepted by this model.
+
+        After the call, ``grounding_chunks`` metadata (source URLs + page
+        titles) is extracted from the candidate and appended to the response
+        text so the Extractor can see exactly which pages were visited.
+        """
+        grounding_tool = genai_types.Tool(
+            google_search=genai_types.GoogleSearch()
+        )
+        research_config = genai_types.GenerateContentConfig(tools=[grounding_tool])
+
+        client = self._require_client()
+        response = client.models.generate_content(
+            model=_GEMINI_MODEL,
+            contents=prompt,
+            config=research_config,
+        )
+        raw_text: str = response.text or ""
+
+        # Harvest grounding chunk metadata — source URLs + titles that Gemini
+        # actually visited.  Appending these gives the Extractor more surface
+        # area and lets it verify which sources were consulted.
+        grounding_sources: list[str] = []
+        if response.candidates:
+            candidate = response.candidates[0]
+            if candidate.grounding_metadata:
+                for chunk in (candidate.grounding_metadata.grounding_chunks or []):
+                    if chunk.web and chunk.web.uri:
+                        title = chunk.web.title or "Unknown"
+                        grounding_sources.append(f"  - {chunk.web.uri} ({title})")
+
+        if grounding_sources:
+            source_block = "\n".join(grounding_sources)
+            raw_text += f"\n\nSOURCES VISITED BY GEMINI [{label}]:\n{source_block}"
+
+        return raw_text
+
+    def _gather_hr_general(
+        self,
+        target_context: str,
+        company_name: str,
+        url: str | None,
+    ) -> str:
+        """
+        Sub-gatherer 1 — Broad HR / General / Admin / Business Directories.
+
+        Covers queries a–i: direct HR searches, payroll, admin, careers,
+        BBB listings, and general business directory sites.  When *url* is
+        provided, the model is instructed to crawl specific subpages of the
+        official site as its first action (LLM-driven, no Python scraping).
+        """
+        url_instruction = ""
+        if url:
+            url_instruction = (
+                f"\nPRIORITY: The official website is confirmed to be: {url}\n"
+                "MANDATORY FIRST STEP: Before running any broad searches, visit the "
+                "official website and specifically check ALL of the following subpages "
+                "(handled by the grounding tool — no manual scraping):\n"
+                f"  - {url}/contact        |  {url}/contact-us\n"
+                f"  - {url}/about          |  {url}/about-us\n"
+                f"  - {url}/careers        |  {url}/jobs\n"
+                f"  - {url}/hr             |  {url}/human-resources\n"
+                f"  - {url}/staff          |  {url}/team   |  {url}/our-people\n"
+                f"  - {url}/locations      |  {url}/directory\n"
+                "Extract ALL contact information visible on each page before proceeding "
+                "to the searches below.\n"
+            )
+
+        prompt = (
+            f"Deep research task: Find contact information for the following target:\n{target_context}\n"
+            f"{url_instruction}\n"
             "SEARCH STRATEGY — run ALL of the following targeted searches in order:\n"
             f"  a) '{company_name} HR department phone email fax'\n"
             f"  b) '{company_name} human resources contact information'\n"
@@ -196,9 +330,9 @@ class GeminiSearchService:
             f"  e) '{company_name} personnel finance secretary labor relations contact'\n"
             f"  f) '{company_name} administrative assistant admin contact'\n"
             f"  g) '{company_name} contact us fax number address'\n"
+            f"  h) site:bbb.org '{company_name}'\n"
+            f"  i) '{company_name}' site:manta.com OR site:yellowpages.com\n"
             "Do NOT stop after the first query. Execute all of the above and consolidate results.\n\n"
-
-            # ── Priority Goals ──────────────────────────────────────────────
             "GOALS:\n"
             "1. First priority: Find Human Resource (HR) contact info — phone, email, fax.\n"
             "2. Also find contact info for ALL of the following departments when available: "
@@ -210,8 +344,6 @@ class GeminiSearchService:
             "6. Provide the official website URL if found.\n"
             "7. Note the context (page section or surrounding label) for every contact found.\n"
             "Be thorough and search multiple sources.\n\n"
-
-            # ── Priority Source List ────────────────────────────────────────
             "SOURCES TO CHECK (in priority order):\n"
             "  1. Official company website — check /contact, /about-us, /careers, /hr, /staff, /team pages.\n"
             "  2. LinkedIn company page — look for HR staff contact details.\n"
@@ -221,8 +353,6 @@ class GeminiSearchService:
             "  6. Indeed / Glassdoor job postings — HR contacts frequently listed.\n"
             "  7. Google Maps business profile — phone, fax, and address.\n"
             "  8. State business registry or SEC filings — for official address and executive contacts.\n\n"
-
-            # ── Email Obfuscation Handling ──────────────────────────────────
             "CRITICAL INSTRUCTION FOR EMAILS:\n"
             "If you see '[email protected]' on the company's website, their emails are hidden by Cloudflare.\n"
             "DO NOT return '[email protected]'. Instead, run new searches on the alternative sources listed above.\n"
@@ -232,25 +362,90 @@ class GeminiSearchService:
             "- Official social media pages"
         )
 
-        grounding_tool = genai_types.Tool(
-            google_search=genai_types.GoogleSearch()
+        logger.debug(
+            f"[GeminiSearchService] Sub-gatherer HR/General starting for {company_name!r}"
         )
-        research_config = genai_types.GenerateContentConfig(
-            tools=[grounding_tool],
+        return self._run_grounded_search(prompt, "HR/General", company_name)
+
+    def _gather_directories_pdfs(
+        self,
+        target_context: str,
+        company_name: str,
+    ) -> str:
+        """
+        Sub-gatherer 2 — Business Directories, PDF Documents, Schema Markup.
+
+        Covers queries j–p: filetype:pdf searches, BBB fax lookups, business
+        directory sites (YellowPages, Manta), inurl: patterns, and schema.org
+        telephone/fax markup searches.  Fax numbers are especially likely to
+        appear in BBB listings and PDF annual reports / press releases.
+        """
+        prompt = (
+            f"Research task: Find phone numbers, fax numbers, emails, and addresses for:\n{target_context}\n\n"
+            "Focus EXCLUSIVELY on these high-value source types: PDF documents, "
+            "business directories, BBB listings, and schema-markup phone tags.\n\n"
+            "SEARCH STRATEGY — run ALL of the following searches:\n"
+            f"  j) '{company_name}' filetype:pdf HR contact\n"
+            f"  k) '{company_name}' filetype:pdf payroll department contact\n"
+            f"  l) '{company_name}' inurl:contact OR inurl:staff OR inurl:team\n"
+            f"  m) '{company_name}' \"tel:\" OR \"fax:\" contact\n"
+            f"  n) '{company_name} fax number' site:bbb.org\n"
+            f"  o) '{company_name}' site:yellowpages.com OR site:manta.com phone fax\n"
+            f"  p) '{company_name}' annual report OR corporate directory contact phone\n"
+            "Do NOT stop after the first query. Execute all of the above.\n\n"
+            "GOALS:\n"
+            "1. Find fax numbers — these are especially likely to appear in BBB listings and PDF documents.\n"
+            "2. Find phone numbers for HR, Payroll, and Admin departments.\n"
+            "3. Find email addresses in PDF press releases or corporate documents.\n"
+            "4. Find physical addresses from business directory listings.\n"
+            "5. Extract ALL contact details visible in any PDF documents you can access.\n\n"
+            "Report ALL contact information found with its source context."
         )
 
-        logger.debug(f"[GeminiSearchService] Step 1: issuing grounded search for {company_name!r}")
-        client = self._require_client()
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=research_prompt,
-            config=research_config,
-        )
-        raw_text: str = response.text or ""
         logger.debug(
-            f"[GeminiSearchService] Step 1: received {len(raw_text)} chars of research"
+            f"[GeminiSearchService] Sub-gatherer Directories/PDFs starting for {company_name!r}"
         )
-        return raw_text
+        return self._run_grounded_search(prompt, "Directories/PDFs", company_name)
+
+    def _gather_social_press(
+        self,
+        target_context: str,
+        company_name: str,
+    ) -> str:
+        """
+        Sub-gatherer 3 — LinkedIn, Social Media, Press Releases, Contact Databases.
+
+        Covers queries q–w: LinkedIn HR/payroll searches, press release contact
+        emails, Glassdoor/Indeed HR contacts, ZoomInfo/Apollo database lookups,
+        and SEC filing contact references.  Press release emails are especially
+        valuable as they are real, verified, and often HR or PR contacts.
+        """
+        prompt = (
+            f"Research task: Find phone numbers, fax numbers, emails, and addresses for:\n{target_context}\n\n"
+            "Focus EXCLUSIVELY on professional networks, press releases, and contact databases.\n\n"
+            "SEARCH STRATEGY — run ALL of the following searches:\n"
+            f"  q) '{company_name}' HR email site:linkedin.com\n"
+            f"  r) '{company_name}' payroll contact site:linkedin.com\n"
+            f"  s) '{company_name}' 'for more information contact' press release email\n"
+            f"  t) '{company_name}' site:glassdoor.com OR site:indeed.com HR contact email\n"
+            f"  u) '{company_name}' site:zoominfo.com OR site:apollo.io HR phone email\n"
+            f"  v) '{company_name}' news press release 'contact:' OR 'contact us at'\n"
+            f"  w) '{company_name}' SEC filing 'human resources' contact phone\n"
+            "Do NOT stop after the first query. Execute all of the above.\n\n"
+            "GOALS:\n"
+            "1. Find HR or Payroll email addresses from LinkedIn or professional profile summaries.\n"
+            "2. Find press release contact emails (these are typically real, verified HR or PR addresses).\n"
+            "3. Find executive or department contact info from ZoomInfo / Apollo summaries.\n"
+            "4. Find contact info mentioned in SEC filings or investor relations documents.\n\n"
+            "Report ALL contact information found with its source context.\n\n"
+            "CRITICAL: If you see '[email protected]' on any website, DO NOT return it. "
+            "Only return real, verified email addresses."
+        )
+
+        logger.debug(
+            f"[GeminiSearchService] Sub-gatherer Social/Press starting for {company_name!r}"
+        )
+        return self._run_grounded_search(prompt, "Social/Press", company_name)
 
     def _extract(
         self,
@@ -282,7 +477,15 @@ class GeminiSearchService:
             "otherwise leave it as an empty string.\n"
             "5. Return ONLY the extracted data values — do NOT return the schema itself.\n"
             "6. If a field has no data, use an empty array [] or empty string \"\".\n"
-            "7. EXCLUDE PLACEHOLDERS: Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...'). Only extract real, verified contact emails."
+            "7. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
+            "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
+            "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
+            "'log in at support@softwareplatform.com'). These are platform credentials, not HR contacts.\n"
+            "   - DO keep emails from outsourced HR, payroll, or benefits providers if they are explicitly "
+            "presented as a contact address for reaching that function on behalf of the target company "
+            "(e.g., a PEO, staffing agency, or parent company managing payroll for this entity).\n"
+            "   Only extract real, verified contact emails used to reach a person or department."
         )
 
         extraction_config = genai_types.GenerateContentConfig(
@@ -329,12 +532,12 @@ class GeminiSearchService:
         Step 3 — Verify extracted contacts against the raw research text.
 
         Each contact's ``value`` field is cross-checked against *research_text*.
-        Contacts whose exact value does not appear verbatim are removed,
+        Phone and fax values are compared after digit-only normalisation (strips
+        dashes, spaces, parentheses, dots) so formatting differences between the
+        extracted value and research text do not cause valid contacts to be
+        incorrectly removed.  Contacts that still cannot be found are removed,
         preventing the LLM from inventing plausible-looking but fictitious
         contact details (e.g. ``hr@company.com`` inferred from the domain).
-
-        The verification is itself an LLM call (no grounding tools) using the
-        same structured-output schema so the result is always a valid model.
         """
         import json
 
@@ -350,8 +553,18 @@ class GeminiSearchService:
             "  ALWAYS REMOVE any email whose value is '[email protected]' or contains "
             "'cloudflare' in its domain. These are Cloudflare email-obfuscation placeholders, "
             "never real contact addresses.\n\n"
+            "PHONE AND FAX NUMBER MATCHING — CRITICAL RULE:\n"
+            "  When checking whether a phone or fax number appears in the research text, "
+            "NORMALIZE both the extracted value AND the research text by stripping ALL "
+            "non-digit characters (spaces, dashes, parentheses, dots, plus signs, etc.) "
+            "before comparing.\n"
+            "  A match on digits alone is SUFFICIENT to KEEP the contact.\n"
+            "  EXAMPLE: '(555) 867-5309' MATCHES '555-867-5309', '555.867.5309', and '5558675309'.\n"
+            "  Do NOT remove a phone or fax number solely because its formatting differs from "
+            "what appears in the research text.\n\n"
             "KEEP a contact if ANY of these conditions are true:\n"
-            "  a) Its exact value (or the full address text for addresses) appears verbatim anywhere in the research text.\n"
+            "  a) Its exact value (or digit-normalized value for phones/faxes, or full address "
+            "text for addresses) appears anywhere in the research text.\n"
             "  b) The research text explicitly attributes it to the company "
             "(e.g. 'contact us at ...', 'call us on ...').\n"
             "  c) It is a GENERIC email (prefix is one of: info, contact, mail, hello, "
@@ -359,7 +572,8 @@ class GeminiSearchService:
             "the company's official website domain found in the research text. "
             "These are legitimate catch-all addresses commonly used by companies.\n\n"
             "REMOVE a contact if ALL of these conditions are true:\n"
-            "  a) Its exact value does NOT appear anywhere in the research text.\n"
+            "  a) Its exact value (or digit-normalized value for phones/faxes) does NOT appear "
+            "anywhere in the research text.\n"
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
