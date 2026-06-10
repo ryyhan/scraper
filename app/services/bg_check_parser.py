@@ -66,8 +66,8 @@ from app.services.pdf_extractor import PdfExtractorService
 # Constants
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL = "gemini-2.5-flash-lite"
-_OPENAI_MODEL = "gpt-4o-mini"
+_GEMINI_MODEL = settings.GEMINI_MODEL
+_OPENAI_MODEL = settings.OPENAI_MODEL
 
 # ---------------------------------------------------------------------------
 # Extraction prompt

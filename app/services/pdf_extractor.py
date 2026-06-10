@@ -52,9 +52,9 @@ from app.core.config import settings
 # Constants
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL = "gemini-2.5-flash-lite"
-_OPENAI_MODEL_SHORT = "gpt-4o-mini"   # ≤ 10 pages
-_OPENAI_MODEL_LONG = "gpt-4o-mini"    # > 10 pages (same model, preserved for easy swap)
+_GEMINI_MODEL = settings.GEMINI_MODEL
+_OPENAI_MODEL_SHORT = settings.OPENAI_MODEL   # ≤ 10 pages
+_OPENAI_MODEL_LONG = settings.OPENAI_MODEL    # > 10 pages (same model, preserved for easy swap)
 _MAX_PAGES_FULL_MODEL = 10            # threshold above which we switch to the cheaper model
 
 _RENDER_DPI = 150        # 150 DPI balances OCR quality vs. payload size
