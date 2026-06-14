@@ -136,7 +136,7 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 
         except Exception as e:
             logger.error(f"Task {task_id}: Error during processing: {e}")
-            message = str(e)
+            message = f"[Scraper] {e}"
             status = "FAILURE"
         
         # --- Save Result to DB ---
@@ -183,7 +183,17 @@ async def create_search_task(request: SearchRequest, background_tasks: Backgroun
 
 @router.get("/google-search/failed/")
 async def get_failed_tasks(limit: int = 10, session: Session = Depends(get_session)):
-    statement = select(TaskRecord).where(TaskRecord.status == "FAILURE").order_by(desc(TaskRecord.updated_at)).limit(limit)
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(
+            (TaskRecord.message.contains("Scraper")) | 
+            (TaskRecord.message.contains("Timeout")) |
+            (TaskRecord.message == "Unknown error")
+        )
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
     tasks = session.exec(statement).all()
     
     results = []
@@ -254,7 +264,7 @@ async def _process_openai_search_task(task_id: str, request: OpenAISearchRequest
         logger.info(f"[openai-search] Task {task_id}: completed successfully")
 
     except Exception as exc:
-        message = str(exc)
+        message = f"OpenAI error: {exc}"
         logger.error(f"[openai-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
@@ -391,7 +401,7 @@ async def _process_gemini_search_task(task_id: str, request: GeminiSearchRequest
         logger.info(f"[gemini-search] Task {task_id}: completed successfully")
 
     except Exception as exc:
-        message = str(exc)
+        message = f"Gemini error: {exc}"
         logger.error(f"[gemini-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
@@ -537,7 +547,7 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
         logger.info(f"[verify-voe] Task {task_id}: completed successfully")
 
     except Exception as exc:
-        message = str(exc)
+        message = f"VOE verification error: {exc}"
         logger.error(f"[verify-voe] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
@@ -678,7 +688,7 @@ async def _process_combined_search_task(task_id: str, request: CombinedSearchReq
         logger.info(f"[combined-search] Task {task_id}: completed successfully")
 
     except Exception as exc:
-        message = str(exc)
+        message = f"Combined search error: {exc}"
         logger.error(f"[combined-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
