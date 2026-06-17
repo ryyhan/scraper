@@ -2,6 +2,7 @@ from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime, timezone
 from sqlmodel import SQLModel, Field, JSON
 from pydantic import BaseModel, field_validator, ConfigDict
+from loguru import logger
 import re
 from enum import Enum
 
@@ -140,6 +141,27 @@ _EMAIL_REGEX = re.compile(
     r"([a-zA-Z0-9\-]*[a-zA-Z0-9])?" # domain: optional middle chars (no leading/trailing hyphen)
     r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$"  # one or more .label segments
 )
+
+
+def _filter_tagged_contacts(v: Any) -> list:
+    """List-level validator: try to build each TaggedContact and silently drop invalid items.
+
+    This prevents a single bad email (e.g. an obfuscated '*****@domain.com' from a
+    website that redacts its address) from invalidating the entire response model.
+    Only applied on list fields — individual TaggedContact validators still run per item.
+    """
+    if not isinstance(v, list):
+        return v  # let Pydantic's own type coercion handle non-list inputs
+    result = []
+    for item in v:
+        if isinstance(item, TaggedContact):
+            result.append(item)  # already validated upstream
+            continue
+        try:
+            result.append(TaggedContact.model_validate(item))
+        except Exception as exc:
+            logger.debug(f"[models] Dropping invalid contact item {item!r}: {exc}")
+    return result
 
 
 class TaggedContact(BaseModel):
@@ -290,6 +312,11 @@ class OpenAICompanyInfo(BaseModel):
     emails: List[TaggedContact] = Field(default_factory=list)
     addresses: List[StructuredAddress] = Field(default_factory=list)
 
+    @field_validator("emails", "phones", "faxes", mode="before")
+    @classmethod
+    def drop_invalid_contacts(cls, v: Any) -> list:
+        return _filter_tagged_contacts(v)
+
 
 
 class OpenAISearchResult(BaseModel):
@@ -316,6 +343,11 @@ class GeminiCompanyInfo(BaseModel):
     faxes: List[TaggedContact] = Field(default_factory=list)
     emails: List[TaggedContact] = Field(default_factory=list)
     addresses: List[StructuredAddress] = Field(default_factory=list)
+
+    @field_validator("emails", "phones", "faxes", mode="before")
+    @classmethod
+    def drop_invalid_contacts(cls, v: Any) -> list:
+        return _filter_tagged_contacts(v)
 
 
 class GeminiSearchResult(BaseModel):
@@ -365,6 +397,11 @@ class CombinedCompanyInfo(BaseModel):
     faxes: List[TaggedContact] = Field(default_factory=list)
     emails: List[TaggedContact] = Field(default_factory=list)
     addresses: List[StructuredAddress] = Field(default_factory=list)
+
+    @field_validator("emails", "phones", "faxes", mode="before")
+    @classmethod
+    def drop_invalid_contacts(cls, v: Any) -> list:
+        return _filter_tagged_contacts(v)
 
 
 class SourceStats(BaseModel):
@@ -446,10 +483,6 @@ class BgCheckFields(BaseModel):
     employer_name: str = Field(
         default="",
         description="Employer / client company named on the report.",
-    )
-    position: str = Field(
-        default="",
-        description="Job title or position the applicant is being considered for.",
     )
     report_date: str = Field(
         default="",

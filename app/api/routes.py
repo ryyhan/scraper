@@ -934,7 +934,7 @@ async def parse_background_check(
     1. **Raw extraction** — the full PDF is processed by the selected vision
        LLM (Gemini Files API or OpenAI gpt-4o-mini) to obtain complete text.
     2. **Field extraction** — a focused, structured LLM call identifies the
-       7 target fields from the raw text using vendor-agnostic label synonyms.
+       6 target fields from the raw text using vendor-agnostic label synonyms.
 
     **Fields returned** (all fields default to `""` if not found):
     - `file_number` — Case / order / reference ID
@@ -942,9 +942,8 @@ async def parse_background_check(
     - `date_of_birth` — Subject's DOB (normalised to YYYY-MM-DD)
     - `requested_by` — Requester name or organisation
     - `employer_name` — Employer / client company
-    - `position` — Job title / position applied for
     - `report_date` — Report date (normalised to YYYY-MM-DD)
-    - `status` — Overall status (e.g. Clear, Consider, Adverse Action)
+    - `status` — Overall status (e.g. Clear, Consider, Full Time Active, No Longer Employed)
 
     **Providers:**
     - `gemini` (default) — uses Gemini Files API + native JSON schema output.

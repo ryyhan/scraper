@@ -83,7 +83,7 @@ DOCUMENT TEXT:
 
 TASK:
 Extract the following fields from the document text above.
-Return a single, flat JSON object with EXACTLY these 7 keys.
+Return a single, flat JSON object with EXACTLY these 6 keys.
 
 FIELD DEFINITIONS AND LABEL SYNONYMS
 (look for any of the listed synonyms in the document):
@@ -115,24 +115,25 @@ FIELD DEFINITIONS AND LABEL SYNONYMS
    – Look for: "Employer", "Company", "Employer Name", "Company Name",
      "Organization", "Hiring Company", "Client Company".
 
-6. "position"
-   – The job title or position the applicant is being considered for.
-   – Look for: "Position", "Job Title", "Position Applied For",
-     "Role", "Title", "Position Title", "Job Position".
-
-7. "report_date"
+6. "report_date"
    – The date the report was generated, completed, or ordered.
    – Look for: "Report Date", "Date", "Order Date", "Ordered Date",
      "Completed Date", "Date Completed", "Date Ordered", "Ordered On",
      "Generated On", "Processed Date".
    – NORMALISE to ISO 8601 format: YYYY-MM-DD.
 
-8. "status"
-   – The overall result or adjudication status of the background check.
+7. "status"
+   – The overall result or adjudication status of the background check, OR
+     an employment-status option that was visually selected on the form.
    – Look for: "Status", "Overall Status", "Result", "Summary Status",
-     "Adjudication", "Overall Result", "Final Status", "Report Status".
+     "Adjudication", "Overall Result", "Final Status", "Report Status",
+     "Employment Status", "Please select all that apply".
    – Return the value exactly as it appears (e.g., "Clear", "Consider",
-     "Adverse Action", "Complete", "Meets Standards", "Review", "Pending").
+     "Adverse Action", "Complete", "Meets Standards", "Review", "Pending",
+     "Full Time Active", "Part Time Active", "No Record",
+     "No Longer Employed", "Independent Contractor").
+   – If multiple options are marked [SELECTED] ("select all that apply"
+     forms), return them as a comma-separated string.
 
 VISUAL SELECTION NOTATION (produced by the OCR stage)
 ──────────────────────────────────────────────────────
@@ -146,13 +147,31 @@ the form (ticks, crosses, circles, scribbles, filled bubbles, etc.).
 When resolving any field whose value is determined by one of these marks:
 • Use the label immediately BEFORE [SELECTED] as the field value.
 • Ignore all labels that are followed by [NOT SELECTED] or [UNCLEAR].
-• If multiple options carry [SELECTED] and the field is normally single-value,
-  return a comma-separated list of the selected labels.
+• If multiple options carry [SELECTED] ("select all that apply" forms),
+  return a comma-separated string of all selected labels.
 • If every option carries [UNCLEAR] or no [SELECTED] exists, return "".
 
-Example — employment status field in the raw text:
+Example 1 — simple employment status field:
   "Employment Status: Full-time [NOT SELECTED]  Part-time [SELECTED]  Contract [NOT SELECTED]"
   → status field value = "Part-time"
+
+Example 2 — "select all that apply" employment status form:
+  "Please select all that apply:
+   Full Time Active [NOT SELECTED]
+   Part Time Active, Average Hours per week: [SELECTED]
+   No Record [NOT SELECTED]
+   No Longer Employed [NOT SELECTED]
+   Independent Contractor [NOT SELECTED]"
+  → status field value = "Part Time Active"
+
+Example 3 — multiple options selected:
+  "Please select all that apply:
+   Full Time Active [SELECTED]
+   Part Time Active, Average Hours per week: [NOT SELECTED]
+   No Record [NOT SELECTED]
+   No Longer Employed [SELECTED]
+   Independent Contractor [NOT SELECTED]"
+  → status field value = "Full Time Active, No Longer Employed"
 
 RULES:
 - Return ONLY the JSON object — no explanation, no markdown fences.
@@ -168,9 +187,8 @@ REQUIRED OUTPUT FORMAT (example):
   "date_of_birth": "1985-04-22",
   "requested_by": "Acme Corp HR Department",
   "employer_name": "Acme Corporation",
-  "position": "Senior Software Engineer",
   "report_date": "2024-11-15",
-  "status": "Clear"
+  "status": "Full Time Active"
 }}
 """
 
