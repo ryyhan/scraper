@@ -92,6 +92,16 @@ Detection guidance — treat the following as a SELECTED mark:
 Treat the following as NOT SELECTED:
   • An empty box  □  or empty circle  ○
   • An option with no mark near it
+  • A printed horizontal line used as a blank fill-in field (e.g. "Average hrs/wk: ______")
+    — these are writing blanks, NOT selection marks, even if they appear next to an option.
+  • A pre-printed dash or underscore that is part of the form's layout/template
+
+IMPORTANT — "underline as selection" rule:
+  Only treat an underline as [SELECTED] if it is a hand-drawn mark placed directly
+  beneath a specific word or label to indicate choice. Do NOT apply this to:
+  • Printed fill-in lines (longer horizontal rules used as writing spaces)
+  • Lines that appear consistently next to every option in a list (layout artifact)
+  • Dashes or underscores that are part of the form's pre-printed template
 
 Transcription notation — inline with the surrounding text:
   • For a checkbox:
@@ -156,6 +166,31 @@ def _retry_openai():
         before_sleep=before_sleep_log(_logging.getLogger(__name__), _logging.WARNING),
         reraise=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _is_repetition_loop(text: str) -> bool:
+    """
+    Detect whether Gemini has entered a token-repetition loop.
+
+    Strategy: take the first 200 characters of the output as a fingerprint
+    and count how many times it occurs in the full text.  A legitimate
+    extraction — even a 30-page dense document — will never repeat the same
+    200-char block 10+ times.  A repetition loop always will.
+
+    The length guard ensures short documents (< 2 000 chars) are never flagged.
+    """
+    _SAMPLE_SIZE = 200
+    _REPEAT_THRESHOLD = 10
+
+    if len(text) < _SAMPLE_SIZE * _REPEAT_THRESHOLD:
+        return False
+
+    sample = text[:_SAMPLE_SIZE]
+    return text.count(sample) >= _REPEAT_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +285,10 @@ class PdfExtractorService:
                 "GEMINI_API_KEY is not configured. "
                 "Set it in your .env file and restart the server."
             )
-        return genai.Client(api_key=api_key)
+        # Set a hard HTTP timeout so a silent hang on generate_content
+        # raises an exception (caught by tenacity) rather than blocking forever.
+        # NOTE: google-genai HttpOptions.timeout is in MILLISECONDS.
+        return genai.Client(api_key=api_key, http_options={"timeout": 180_000})
 
     def _extract_gemini(self, pdf_bytes: bytes, filename: str) -> tuple[str, int]:
         """
@@ -315,6 +353,29 @@ class PdfExtractorService:
                 f"[PdfExtractor][Gemini] Could not delete uploaded file "
                 f"{uploaded_file.name!r}: {cleanup_err}"
             )
+
+        # ── Repetition-loop detection ────────────────────────────────
+        # Checked OUTSIDE the retry decorator: retrying the same PDF with
+        # the same prompt will produce the same loop.  Surface a clear error
+        # so the caller can decide to switch provider or inspect the file.
+        if _is_repetition_loop(extracted_text):
+            raise RuntimeError(
+                f"[PdfExtractor][Gemini] Repetition loop detected for "
+                f"{filename!r} — output was {len(extracted_text):,} chars. "
+                f"The PDF may contain content that confuses the vision model. "
+                f"Try the OpenAI provider as an alternative."
+            )
+
+        # ── Safety truncation ────────────────────────────────────────────
+        # Last-resort cap for pathological cases not caught above.
+        # 150 000 chars ≈ 37 500 tokens — comfortably covers 30+ dense pages.
+        _MAX_CHARS = 150_000
+        if len(extracted_text) > _MAX_CHARS:
+            logger.warning(
+                f"[PdfExtractor][Gemini] Output unusually large "
+                f"({len(extracted_text):,} chars) — truncating to {_MAX_CHARS:,}."
+            )
+            extracted_text = extracted_text[:_MAX_CHARS]
 
         # Estimate page count from page markers inserted by the prompt.
         page_count = self._count_pages_from_markers(extracted_text)

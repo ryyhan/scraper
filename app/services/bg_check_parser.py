@@ -132,8 +132,26 @@ FIELD DEFINITIONS AND LABEL SYNONYMS
      "Adverse Action", "Complete", "Meets Standards", "Review", "Pending",
      "Full Time Active", "Part Time Active", "No Record",
      "No Longer Employed", "Independent Contractor").
-   – If multiple options are marked [SELECTED] ("select all that apply"
-     forms), return them as a comma-separated string.
+
+   EMPLOYMENT STATUS OPTIONS — SPECIAL RULES (apply all of these):
+
+   RULE A — Mutual exclusivity (STRICTLY ENFORCED):
+     The options Full Time Active / Part Time Active / No Record /
+     No Longer Employed / Independent Contractor are RADIO BUTTONS.
+     A person can only hold ONE employment status at a time.
+     NEVER return more than one of these as a comma-separated list.
+     If the raw text shows multiple as [SELECTED] (OCR noise / layout artifact),
+     pick the SINGLE most plausible one using document context.
+     If you cannot determine a single answer, return "".
+
+   RULE B — Strip supplementary fill-in data from the option label:
+     Some option labels include a fill-in component, for example:
+       "Part Time Active, Average Hours per week: 18.5"
+       "Part Time Active, Average Hours per week: ______"
+     Return ONLY the base option name: "Part Time Active".
+     Discard everything after the first comma or colon that follows the
+     core option name. Never include hours, numbers, or fill-in text
+     in the status value.
 
 VISUAL SELECTION NOTATION (produced by the OCR stage)
 ──────────────────────────────────────────────────────
@@ -149,29 +167,57 @@ When resolving any field whose value is determined by one of these marks:
 • Ignore all labels that are followed by [NOT SELECTED] or [UNCLEAR].
 • If multiple options carry [SELECTED] ("select all that apply" forms),
   return a comma-separated string of all selected labels.
-• If every option carries [UNCLEAR] or no [SELECTED] exists, return "".
+• If the employment status section is present but every option is [NOT SELECTED]
+  or [UNCLEAR] (i.e. nothing was marked), return "NA".
+• If no status field can be found anywhere in the document, return "".
 
 Example 1 — simple employment status field:
   "Employment Status: Full-time [NOT SELECTED]  Part-time [SELECTED]  Contract [NOT SELECTED]"
   → status field value = "Part-time"
 
-Example 2 — "select all that apply" employment status form:
+Example 2 — option selected and fill-in value present in label (RULE B applies):
   "Please select all that apply:
    Full Time Active [NOT SELECTED]
-   Part Time Active, Average Hours per week: [SELECTED]
+   Part Time Active, Average Hours per week: 18.5 [SELECTED]
    No Record [NOT SELECTED]
    No Longer Employed [NOT SELECTED]
    Independent Contractor [NOT SELECTED]"
   → status field value = "Part Time Active"
+    (strip ", Average Hours per week: 18.5" — that is fill-in supplementary data)
 
-Example 3 — multiple options selected:
+Example 3 — OCR ambiguity (fill-in lines misread as marks), apply disambiguation:
   "Please select all that apply:
    Full Time Active [SELECTED]
    Part Time Active, Average Hours per week: [NOT SELECTED]
-   No Record [NOT SELECTED]
-   No Longer Employed [SELECTED]
+   No Record [SELECTED]
+   No Longer Employed [NOT SELECTED]
    Independent Contractor [NOT SELECTED]"
-  → status field value = "Full Time Active, No Longer Employed"
+  → These options are mutually exclusive. "Full Time Active" and "No Record"
+    cannot both be true. Use context clues from the rest of the document
+    (e.g. dates of employment, employer name) to pick the most plausible one.
+    If context is insufficient, return "NA".
+
+Example 4 — both RULE A and RULE B needed (mirrors a known real failure):
+  "Please select all that apply:
+   Full Time Active [NOT SELECTED]
+   Part Time Active, Average Hours per week: 18.5 [SELECTED]
+   No Record [SELECTED]
+   No Longer Employed [NOT SELECTED]
+   Independent Contractor [NOT SELECTED]"
+  → "Part Time Active" and "No Record" are mutually exclusive — RULE A.
+    Strip fill-in data from the label — RULE B.
+    Return the single most plausible answer: "Part Time Active".
+    ("No Record" is an OCR artifact; an active part-time worker has a record.)
+
+Example 5 — employment status section present but nothing is marked:
+  "Please select all that apply:
+   Full Time Active [NOT SELECTED]
+   Part Time Active, Average Hours per week: [NOT SELECTED]
+   No Record [NOT SELECTED]
+   No Longer Employed [NOT SELECTED]
+   Independent Contractor [NOT SELECTED]"
+  → status field value = "NA"
+    (The section exists but no option was selected.)
 
 RULES:
 - Return ONLY the JSON object — no explanation, no markdown fences.
@@ -316,7 +362,10 @@ class BgCheckParserService:
                 "GEMINI_API_KEY is not configured. "
                 "Set it in your .env file and restart the server."
             )
-        return genai.Client(api_key=api_key)
+        # 60-second HTTP timeout — Stage 2 is text-only, so this is generous.
+        # A silent hang raises an exception that tenacity will catch and retry.
+        # NOTE: google-genai HttpOptions.timeout is in MILLISECONDS.
+        return genai.Client(api_key=api_key, http_options={"timeout": 60_000})
 
     def _extract_fields_gemini(self, raw_text: str) -> dict:
         """
