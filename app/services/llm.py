@@ -2,25 +2,20 @@ import json
 from typing import List, Optional
 from groq import AsyncGroq, RateLimitError, APIStatusError
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.models import ContactInfo
 from app.core.config import settings
+from app.services._retry import retry_groq
 
 class LLMService:
     def __init__(self):
         self.api_key = settings.GROQ_API_KEY
         if not self.api_key:
             logger.warning("GROQ_API_KEY not found in settings.")
-        self.client = AsyncGroq(api_key=self.api_key)
+        # max_retries=2: SDK inner-layer reads Retry-After headers on 429/5xx
+        # before our tenacity outer-layer (in _retry.py) takes over.
+        self.client = AsyncGroq(api_key=self.api_key, max_retries=2)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((RateLimitError, APIStatusError)),
-        before_sleep=lambda retry_state: logger.warning(
-            f"Retrying Groq verify_official_site. Attempt {retry_state.attempt_number}"
-        )
-    )
+    @retry_groq()
     async def verify_official_site(self, search_results: List[str], company_name: str) -> str:
         if not search_results:
             return ""
@@ -55,14 +50,7 @@ class LLMService:
             logger.error(f"LLM site verification error: {e}")
             return ""
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((RateLimitError, APIStatusError)),
-        before_sleep=lambda retry_state: logger.warning(
-            f"Retrying Groq extract_contact_info. Attempt {retry_state.attempt_number}"
-        )
-    )
+    @retry_groq()
     async def extract_contact_info(self, page_text: str) -> Optional[ContactInfo]:
         if not page_text:
             return None
@@ -116,14 +104,7 @@ class LLMService:
             logger.error(f"LLM extraction error: {e}")
             return None
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=2, max=6),
-        retry=retry_if_exception_type((RateLimitError, APIStatusError)),
-        before_sleep=lambda retry_state: logger.warning(
-            f"Retrying Groq extract_fallback_email. Attempt {retry_state.attempt_number}"
-        )
-    )
+    @retry_groq()
     async def extract_fallback_email(self, snippets_text: str, current_info: ContactInfo) -> ContactInfo:
         if not snippets_text:
             return current_info

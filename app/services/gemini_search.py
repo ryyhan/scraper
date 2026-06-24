@@ -60,6 +60,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.models import ContactTag
+from app.services._retry import retry_gemini
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -100,8 +101,19 @@ class GeminiSearchService:
         # Defer the ValueError from the SDK until an actual API call is made,
         # so that the service can be safely instantiated without a key (e.g.
         # during import-time checks and unit tests without live credentials).
+        # Dual-layer retry (inner): SDK retries 2x reading Retry-After headers
+        # before tenacity's outer-layer takes over.
+        # HttpOptions.timeout is in MILLISECONDS; 120 s is generous for grounded searches.
+        from google.genai import types as _genai_types
         self._client: genai.Client | None = (
-            genai.Client(api_key=api_key) if api_key else None
+            genai.Client(
+                api_key=api_key,
+                http_options=_genai_types.HttpOptions(
+                    timeout=120_000,
+                    retry_options=_genai_types.HttpRetryOptions(attempts=2),
+                ),
+            )
+            if api_key else None
         )
 
     # ------------------------------------------------------------------
@@ -246,7 +258,7 @@ class GeminiSearchService:
 
     def _run_grounded_search(self, prompt: str, label: str, company_name: str) -> str:
         """
-        Execute a single grounded Gemini search call.
+        Execute a single grounded Gemini search call with retry protection.
 
         Uses ``Tool(google_search=GoogleSearch())`` — the only grounding
         mechanism supported by ``gemini-2.5-flash-lite``.  The model always
@@ -256,6 +268,10 @@ class GeminiSearchService:
         After the call, ``grounding_chunks`` metadata (source URLs + page
         titles) is extracted from the candidate and appended to the response
         text so the Extractor can see exactly which pages were visited.
+
+        Transient errors (429 quota, 503 service unavailable, 500 server error,
+        deadline exceeded) are automatically retried with exponential backoff
+        via the shared ``retry_gemini()`` decorator from ``_retry.py``.
         """
         grounding_tool = genai_types.Tool(
             google_search=genai_types.GoogleSearch()
@@ -263,11 +279,16 @@ class GeminiSearchService:
         research_config = genai_types.GenerateContentConfig(tools=[grounding_tool])
 
         client = self._require_client()
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=prompt,
-            config=research_config,
-        )
+
+        @retry_gemini()
+        def _call() -> genai.types.GenerateContentResponse:  # type: ignore[name-defined]
+            return client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=prompt,
+                config=research_config,
+            )
+
+        response = _call()
         raw_text: str = response.text or ""
 
         # Harvest grounding chunk metadata — source URLs + titles that Gemini
@@ -497,11 +518,16 @@ class GeminiSearchService:
             f"[GeminiSearchService] Step 2: issuing structured extraction for {company_name!r}"
         )
         client = self._require_client()
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=extraction_prompt,
-            config=extraction_config,
-        )
+
+        @retry_gemini()
+        def _call() -> genai.types.GenerateContentResponse:  # type: ignore[name-defined]
+            return client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=extraction_prompt,
+                config=extraction_config,
+            )
+
+        response = _call()
 
         # `response.parsed` is automatically populated by the SDK when
         # `response_schema` is a Pydantic model class.
@@ -592,11 +618,16 @@ class GeminiSearchService:
             f"[GeminiSearchService] Step 3: verifying extracted contacts for {company_name!r}"
         )
         client = self._require_client()
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=verification_prompt,
-            config=verification_config,
-        )
+
+        @retry_gemini()
+        def _call() -> genai.types.GenerateContentResponse:  # type: ignore[name-defined]
+            return client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=verification_prompt,
+                config=verification_config,
+            )
+
+        response = _call()
 
         if response.parsed is not None:
             verified = response.parsed  # type: ignore[assignment]

@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.models import ContactTag
+from app.services._retry import retry_openai
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -84,7 +85,9 @@ class OpenAISearchService:
         api_key = settings.OPENAI_API_KEY
         if not api_key:
             logger.warning("OPENAI_API_KEY is not configured – OpenAI calls will fail.")
-        self._client: OpenAI | None = OpenAI(api_key=api_key) if api_key else None
+        # max_retries=2: SDK inner-layer reads Retry-After headers on 429/5xx
+        # before our tenacity outer-layer (in _retry.py) takes over.
+        self._client: OpenAI | None = OpenAI(api_key=api_key, max_retries=2) if api_key else None
 
     def _require_client(self) -> OpenAI:
         """Return the configured client or raise clearly if no API key was set."""
@@ -158,11 +161,15 @@ class OpenAISearchService:
             "   Only extract real, verified contact emails used to reach a person or department."
         )
 
-        final_response = self._require_client().responses.create(
-            model=_OPENAI_MODEL,
-            input=extraction_prompt,
-            text={"format": {"type": "json_object"}},
-        )
+        @retry_openai()
+        def _extract_call():
+            return self._require_client().responses.create(
+                model=_OPENAI_MODEL,
+                input=extraction_prompt,
+                text={"format": {"type": "json_object"}},
+            )
+
+        final_response = _extract_call()
 
         # ── Parse + clean + validate ───────────────────────────────────────────
         data = json.loads(final_response.output_text)
@@ -274,11 +281,16 @@ class OpenAISearchService:
         )
 
         logger.debug(f"[OpenAISearchService] Turn 1: HR/General/Directories for {company_name!r}")
-        r1 = client.responses.create(
-            model=_OPENAI_MODEL,
-            tools=[_WEB_SEARCH_TOOL],
-            input=turn1_prompt,
-        )
+
+        @retry_openai()
+        def _t1():
+            return client.responses.create(
+                model=_OPENAI_MODEL,
+                tools=[_WEB_SEARCH_TOOL],
+                input=turn1_prompt,
+            )
+
+        r1 = _t1()
 
         # ── Turn 2: PDFs / BBB / Schema Markup / Business Directories ─────────
         turn2_prompt = (
@@ -297,12 +309,17 @@ class OpenAISearchService:
         )
 
         logger.debug(f"[OpenAISearchService] Turn 2: PDFs/BBB/Schema for {company_name!r}")
-        r2 = client.responses.create(
-            model=_OPENAI_MODEL,
-            tools=[_WEB_SEARCH_TOOL],
-            previous_response_id=r1.id,
-            input=turn2_prompt,
-        )
+
+        @retry_openai()
+        def _t2():
+            return client.responses.create(
+                model=_OPENAI_MODEL,
+                tools=[_WEB_SEARCH_TOOL],
+                previous_response_id=r1.id,
+                input=turn2_prompt,
+            )
+
+        r2 = _t2()
 
         # ── Turn 3: LinkedIn / Social / Press Releases ─────────────────────────
         turn3_prompt = (
@@ -320,12 +337,17 @@ class OpenAISearchService:
         )
 
         logger.debug(f"[OpenAISearchService] Turn 3: LinkedIn/Social/Press for {company_name!r}")
-        r3 = client.responses.create(
-            model=_OPENAI_MODEL,
-            tools=[_WEB_SEARCH_TOOL],
-            previous_response_id=r2.id,
-            input=turn3_prompt,
-        )
+
+        @retry_openai()
+        def _t3():
+            return client.responses.create(
+                model=_OPENAI_MODEL,
+                tools=[_WEB_SEARCH_TOOL],
+                previous_response_id=r2.id,
+                input=turn3_prompt,
+            )
+
+        r3 = _t3()
 
         logger.debug(
             f"[OpenAISearchService] Multi-turn complete for {company_name!r}: "
@@ -406,11 +428,16 @@ class OpenAISearchService:
         logger.debug(
             f"[OpenAISearchService] Step 3: verifying extracted contacts for {company_name!r}"
         )
-        verify_response = self._require_client().responses.create(
-            model=_OPENAI_MODEL,
-            input=verification_prompt,
-            text={"format": {"type": "json_object"}},
-        )
+
+        @retry_openai()
+        def _verify_call():
+            return self._require_client().responses.create(
+                model=_OPENAI_MODEL,
+                input=verification_prompt,
+                text={"format": {"type": "json_object"}},
+            )
+
+        verify_response = _verify_call()
 
         data = json.loads(verify_response.output_text)
         cleaned_data = self._clean_dict(data)

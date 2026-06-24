@@ -48,6 +48,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.models import VoeRequest, VoeVerificationResult
+from app.services._retry import retry_gemini
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -93,8 +94,19 @@ class VoeVerificationService:
             logger.warning(
                 "GEMINI_API_KEY is not configured – VOE verification calls will fail."
             )
+        # Dual-layer retry (inner): SDK retries 2x reading Retry-After headers
+        # before tenacity's outer-layer takes over.
+        # HttpOptions.timeout is in MILLISECONDS.
+        from google.genai import types as _genai_types
         self._client: genai.Client | None = (
-            genai.Client(api_key=api_key) if api_key else None
+            genai.Client(
+                api_key=api_key,
+                http_options=_genai_types.HttpOptions(
+                    timeout=60_000,
+                    retry_options=_genai_types.HttpRetryOptions(attempts=2),
+                ),
+            )
+            if api_key else None
         )
 
     # ------------------------------------------------------------------
@@ -212,11 +224,16 @@ class VoeVerificationService:
             f"[VoeVerificationService] Step 1: grounded search for "
             f"{request.full_name!r} @ {request.company!r}"
         )
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=prompt,
-            config=config,
-        )
+
+        @retry_gemini()
+        def _call() -> "genai.types.GenerateContentResponse":  # type: ignore[name-defined]
+            return client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=prompt,
+                config=config,
+            )
+
+        response = _call()
         raw_text: str = response.text or ""
         logger.debug(
             f"[VoeVerificationService] Step 1: received {len(raw_text)} chars of evidence"
@@ -271,11 +288,16 @@ class VoeVerificationService:
         logger.debug(
             f"[VoeVerificationService] Step 2: structured scoring for {request.full_name!r}"
         )
-        response = client.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=prompt,
-            config=config,
-        )
+
+        @retry_gemini()
+        def _call() -> "genai.types.GenerateContentResponse":  # type: ignore[name-defined]
+            return client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=prompt,
+                config=config,
+            )
+
+        response = _call()
 
         # Prefer SDK-parsed Pydantic object (zero boilerplate)
         if response.parsed is not None:

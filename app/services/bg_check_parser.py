@@ -47,17 +47,11 @@ from __future__ import annotations
 
 import json
 import re
-import logging as _logging
 from typing import Literal
 
 from loguru import logger
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-    before_sleep_log,
-)
+
+from app.services._retry import retry_gemini as _retry_gemini, retry_openai as _retry_openai
 
 from app.core.config import settings
 from app.services.pdf_extractor import PdfExtractorService
@@ -240,41 +234,9 @@ REQUIRED OUTPUT FORMAT (example):
 
 
 # ---------------------------------------------------------------------------
-# Retry helpers (reuse same strategy as pdf_extractor.py)
+# Retry helpers — imported from the shared module (app/services/_retry.py)
 # ---------------------------------------------------------------------------
-
-def _retry_gemini():
-    """tenacity retry decorator for Gemini Stage-2 calls."""
-    try:
-        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
-        exc_types: tuple = (ResourceExhausted, ServiceUnavailable)
-    except ImportError:
-        exc_types = (Exception,)
-
-    return retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=15),
-        retry=retry_if_exception_type(exc_types),
-        before_sleep=before_sleep_log(_logging.getLogger(__name__), _logging.WARNING),
-        reraise=True,
-    )
-
-
-def _retry_openai():
-    """tenacity retry decorator for OpenAI Stage-2 calls."""
-    try:
-        from openai import RateLimitError, APIStatusError
-        exc_types: tuple = (RateLimitError, APIStatusError)
-    except ImportError:
-        exc_types = (Exception,)
-
-    return retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=15),
-        retry=retry_if_exception_type(exc_types),
-        before_sleep=before_sleep_log(_logging.getLogger(__name__), _logging.WARNING),
-        reraise=True,
-    )
+# _retry_gemini and _retry_openai are imported at the top of this file.
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +324,16 @@ class BgCheckParserService:
                 "GEMINI_API_KEY is not configured. "
                 "Set it in your .env file and restart the server."
             )
-        # 60-second HTTP timeout — Stage 2 is text-only, so this is generous.
-        # A silent hang raises an exception that tenacity will catch and retry.
-        # NOTE: google-genai HttpOptions.timeout is in MILLISECONDS.
-        return genai.Client(api_key=api_key, http_options={"timeout": 60_000})
+        # Dual-layer retry (inner): SDK retries 2x reading Retry-After headers
+        # before tenacity's outer-layer takes over.  timeout is in MILLISECONDS.
+        from google.genai import types as _genai_types
+        return genai.Client(
+            api_key=api_key,
+            http_options=_genai_types.HttpOptions(
+                timeout=60_000,
+                retry_options=_genai_types.HttpRetryOptions(attempts=2),
+            ),
+        )
 
     def _extract_fields_gemini(self, raw_text: str) -> dict:
         """
@@ -423,7 +391,9 @@ class BgCheckParserService:
                 "OPENAI_API_KEY is not configured. "
                 "Set it in your .env file and restart the server."
             )
-        return OpenAI(api_key=api_key)
+        # max_retries=2: SDK inner-layer reads Retry-After headers on 429/5xx
+        # before our tenacity outer-layer (in _retry.py) takes over.
+        return OpenAI(api_key=api_key, max_retries=2)
 
     def _extract_fields_openai(self, raw_text: str) -> dict:
         """
