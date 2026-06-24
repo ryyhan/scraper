@@ -367,6 +367,15 @@ class VoeRequest(BaseModel):
     zip_code: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
+    provider: Literal["gemini", "openai", "both"] = "gemini"
+    """LLM provider to use for employment verification.
+
+    - ``gemini``  (default) — Gemini with live Google Search grounding.
+    - ``openai``            — OpenAI Responses API with web_search tool.
+    - ``both``              — Runs both concurrently; returns each result
+                              plus a ``best_result`` chosen by the highest
+                              ``confidence_score``.
+    """
 
 
 class VoeVerificationResult(BaseModel):
@@ -378,6 +387,35 @@ class VoeVerificationResult(BaseModel):
     verdict: Literal["VERIFIED", "LIKELY", "UNVERIFIED", "CONTRADICTED"]
     evidence_summary: str       # 2–3 sentence human-readable explanation
     sources_found: List[str]    # URLs or source names used as evidence
+
+
+class VoeProviderResult(BaseModel):
+    """A single provider's outcome within a combined VOE response."""
+    provider: Literal["gemini", "openai"]
+    result: Optional[VoeVerificationResult] = None
+    error: Optional[str] = Field(
+        default=None,
+        description="Set when this provider's pipeline failed; result will be null.",
+    )
+
+
+class CombinedVoeResult(BaseModel):
+    """
+    Full response envelope returned by POST /verify-voe/ when ``provider='both'``.
+
+    ``best_result`` is the result from whichever provider returned the higher
+    ``confidence_score``.  Both raw provider results are also included so the
+    caller can inspect the evidence from each source independently.
+    """
+    full_name: str
+    company: str
+    job_title: str
+    best_result: Optional[VoeVerificationResult] = Field(
+        default=None,
+        description="The higher-confidence result across both providers.",
+    )
+    gemini: VoeProviderResult
+    openai: VoeProviderResult
 
 
 # --- Combined Search Models ---
