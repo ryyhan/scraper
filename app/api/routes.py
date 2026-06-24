@@ -15,6 +15,7 @@ from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.models import PdfExtractionResult
 from app.models import BgCheckFields, BgCheckParseResult
 from app.api.deps import get_session
+from app.api.rate_limit import task_rate_limit
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
 from app.services import VoeVerificationService
@@ -168,17 +169,22 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
         logger.info(f"Task {task_id}: Completed with status {status}")
 
 @router.post("/google-search/")
-async def create_search_task(request: SearchRequest, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+async def create_search_task(
+    request: SearchRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
+):
     task_id = str(uuid.uuid4())
     task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
-    
+
     # Use config-defined webhook or mock
     webhook_url = settings.WEBHOOK_URL or "http://localhost:8000/webhook-mock"
-    
+
     background_tasks.add_task(process_scraping_task, task_id, request, webhook_url)
-    
+
     return {"task_id": task_id, "status": "IN_PROGRESS"}
 
 @router.get("/google-search/failed/")
@@ -289,6 +295,7 @@ async def create_openai_search_task(
     request: OpenAISearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous OpenAI-powered contact-info lookup for *company_name*.
@@ -426,6 +433,7 @@ async def create_gemini_search_task(
     request: GeminiSearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous Gemini-powered contact-info lookup for *company_name*.
@@ -572,6 +580,7 @@ async def create_voe_task(
     request: VoeRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous employment-verification job for the given person.
@@ -713,12 +722,13 @@ async def create_combined_search_task(
     request: CombinedSearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous combined search job for the given company.
-    
+
     This calls both the OpenAI and Gemini pipelines concurrently and aggregates their results.
-    
+
     Returns a *task_id* that can be polled via **GET /combined-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
