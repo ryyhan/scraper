@@ -49,7 +49,7 @@ from fastapi import Depends, HTTPException, Request, status
 # ---------------------------------------------------------------------------
 
 #: Maximum number of task-creation requests allowed per IP within the window.
-RATE_LIMIT_REQUESTS: int = 10
+RATE_LIMIT_REQUESTS: int = 15
 
 #: Duration of the sliding window in seconds.
 RATE_LIMIT_WINDOW_SECONDS: float = 60.0
