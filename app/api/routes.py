@@ -684,6 +684,27 @@ async def create_voe_task(
 
     When `provider=both`, both `GEMINI_API_KEY` and `OPENAI_API_KEY` must be set.
     """
+    # ── Fail fast if required API key(s) are missing ────────────────────────────
+    # Mirrors the pattern used by /extract-pdf/ and /parse-background-check/.
+    # Returning HTTP 400 here is far more useful than returning 200 IN_PROGRESS
+    # only for the background task to fail immediately with a cryptic RuntimeError.
+    if request.provider in ("gemini", "both") and not settings.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GEMINI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+    if request.provider in ("openai", "both") and not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "OPENAI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+
     task_id = str(uuid.uuid4())
     task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
     session.add(task_record)
@@ -706,7 +727,12 @@ async def get_failed_voe_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
+            # "VOE verification error: ..." — normal failure path through except block.
+            # "Unknown error"              — task crashed before reaching except block
+            #                               (e.g. import error, OOM, task cancellation).
+            # Both must be covered so no failed VOE task is invisible in this endpoint.
             TaskRecord.message.contains("verification")  # type: ignore[union-attr]
+            | (TaskRecord.message == "Unknown error")     # type: ignore[union-attr]
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
