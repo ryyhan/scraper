@@ -12,6 +12,8 @@ from .models import (
     GeminiSearchResult,
     VoeRequest,
     VoeVerificationResult,
+    VoeProviderResult,
+    CombinedVoeResult,
     CombinedSearchRequest,
     CombinedCompanyInfo,
     CombinedSearchResult,

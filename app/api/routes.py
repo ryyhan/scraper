@@ -10,14 +10,16 @@ from sqlmodel import Session, select, desc, String
 from app.models import SearchRequest, TaskRecord, ScrapeResult, WebhookPayload
 from app.models import OpenAISearchRequest, OpenAISearchResult, OpenAICompanyInfo
 from app.models import GeminiSearchRequest, GeminiSearchResult
-from app.models import VoeRequest, VoeVerificationResult
+from app.models import VoeRequest, VoeVerificationResult, VoeProviderResult, CombinedVoeResult
 from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.models import PdfExtractionResult
 from app.models import BgCheckFields, BgCheckParseResult
 from app.api.deps import get_session
+from app.api.rate_limit import task_rate_limit
 from app.services import ScraperService, LLMService, WebhookService
 from app.services import OpenAISearchService, GeminiSearchService
 from app.services import VoeVerificationService
+from app.services import OpenAIVoeService
 from app.services import CombinedSearchService
 from app.services import PdfExtractorService
 from app.services import BgCheckParserService
@@ -168,17 +170,22 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
         logger.info(f"Task {task_id}: Completed with status {status}")
 
 @router.post("/google-search/")
-async def create_search_task(request: SearchRequest, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+async def create_search_task(
+    request: SearchRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
+):
     task_id = str(uuid.uuid4())
     task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
-    
+
     # Use config-defined webhook or mock
     webhook_url = settings.WEBHOOK_URL or "http://localhost:8000/webhook-mock"
-    
+
     background_tasks.add_task(process_scraping_task, task_id, request, webhook_url)
-    
+
     return {"task_id": task_id, "status": "IN_PROGRESS"}
 
 @router.get("/google-search/failed/")
@@ -289,6 +296,7 @@ async def create_openai_search_task(
     request: OpenAISearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous OpenAI-powered contact-info lookup for *company_name*.
@@ -426,6 +434,7 @@ async def create_gemini_search_task(
     request: GeminiSearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous Gemini-powered contact-info lookup for *company_name*.
@@ -512,12 +521,17 @@ async def get_gemini_task_status(
 
 async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
     """
-    Background coroutine that runs the two-step VOE verification pipeline
-    inside a thread pool (Gemini SDK is synchronous) then persists the
-    result to the shared TaskRecord table.
+    Background coroutine that routes to the correct VOE provider pipeline(s)
+    based on ``request.provider`` then persists the result to the DB.
+
+    - ``gemini`` — single Gemini two-step pipeline (original behaviour).
+    - ``openai`` — single OpenAI two-step pipeline (web_search grounding).
+    - ``both``   — both pipelines run concurrently via asyncio.gather;
+                   the higher-confidence result is surfaced as ``best_result``.
     """
+    provider = request.provider
     logger.info(
-        f"[verify-voe] Task {task_id}: starting for "
+        f"[verify-voe] Task {task_id}: starting (provider={provider!r}) for "
         f"{request.full_name!r} @ {request.company!r}"
     )
 
@@ -530,21 +544,97 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
     }
 
     try:
-        service = VoeVerificationService()
+        if provider == "gemini":
+            # ── Single-provider: Gemini ────────────────────────────────────
+            service = VoeVerificationService()
+            result: VoeVerificationResult = await asyncio.to_thread(
+                service.verify, request
+            )
+            status = "SUCCESS"
+            message = (
+                f"Verification complete (gemini) – score={result.confidence_score} "
+                f"verdict={result.verdict}"
+            )
+            result_data = result.model_dump()
 
-        # Offload synchronous Gemini SDK calls to a thread pool
-        result: VoeVerificationResult = await asyncio.to_thread(
-            service.verify,
-            request,
-        )
+        elif provider == "openai":
+            # ── Single-provider: OpenAI ────────────────────────────────────
+            service_oai = OpenAIVoeService()
+            result_oai: VoeVerificationResult = await asyncio.to_thread(
+                service_oai.verify, request
+            )
+            status = "SUCCESS"
+            message = (
+                f"Verification complete (openai) – score={result_oai.confidence_score} "
+                f"verdict={result_oai.verdict}"
+            )
+            result_data = result_oai.model_dump()
 
-        status = "SUCCESS"
-        message = (
-            f"Verification complete – score={result.confidence_score} "
-            f"verdict={result.verdict}"
-        )
-        result_data = result.model_dump()
-        logger.info(f"[verify-voe] Task {task_id}: completed successfully")
+        else:  # provider == "both"
+            # ── Concurrent dual-provider ───────────────────────────────────
+            gemini_svc = VoeVerificationService()
+            openai_svc = OpenAIVoeService()
+
+            gemini_task = asyncio.to_thread(gemini_svc.verify, request)
+            openai_task = asyncio.to_thread(openai_svc.verify, request)
+
+            raw_results = await asyncio.gather(
+                gemini_task, openai_task, return_exceptions=True
+            )
+
+            gemini_res: VoeVerificationResult | None = None
+            gemini_err: str | None = None
+            openai_res: VoeVerificationResult | None = None
+            openai_err: str | None = None
+
+            if isinstance(raw_results[0], Exception):
+                gemini_err = str(raw_results[0])
+                logger.error(f"[verify-voe] Task {task_id}: Gemini failed – {gemini_err}")
+            else:
+                gemini_res = raw_results[0]
+
+            if isinstance(raw_results[1], Exception):
+                openai_err = str(raw_results[1])
+                logger.error(f"[verify-voe] Task {task_id}: OpenAI failed – {openai_err}")
+            else:
+                openai_res = raw_results[1]
+
+            if not gemini_res and not openai_res:
+                raise RuntimeError(
+                    "Both Gemini and OpenAI VOE pipelines failed. "
+                    f"Gemini: {gemini_err}. OpenAI: {openai_err}."
+                )
+
+            # Pick the result with the higher confidence score as best_result
+            candidates = [r for r in (gemini_res, openai_res) if r is not None]
+            best = max(candidates, key=lambda r: r.confidence_score)
+
+            combined = CombinedVoeResult(
+                full_name=request.full_name,
+                company=request.company,
+                job_title=request.job_title,
+                best_result=best,
+                gemini=VoeProviderResult(
+                    provider="gemini",
+                    result=gemini_res,
+                    error=gemini_err,
+                ),
+                openai=VoeProviderResult(
+                    provider="openai",
+                    result=openai_res,
+                    error=openai_err,
+                ),
+            )
+
+            status = "SUCCESS"
+            message = (
+                f"Combined verification complete – "
+                f"best={best.verdict} (score={best.confidence_score}, "
+                f"provider={'gemini' if best is gemini_res else 'openai'})"
+            )
+            result_data = combined.model_dump()
+
+        logger.info(f"[verify-voe] Task {task_id}: completed successfully ({provider})")
 
     except Exception as exc:
         message = f"VOE verification error: {exc}"
@@ -567,23 +657,32 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
             )
 
 
-@router.post("/verify-voe/", summary="Verify employment of a person via Gemini web research")
+@router.post("/verify-voe/", summary="Verify employment of a person via Gemini, OpenAI, or both")
 async def create_voe_task(
     request: VoeRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous employment-verification job for the given person.
 
-    Gemini performs live Google Search grounding to gather evidence across
-    LinkedIn, company directories, press releases, and news articles, then
-    scores its confidence (0–10) against a calibrated rubric.
+    The LLM performs live web research to gather evidence across LinkedIn,
+    company directories, press releases, and news articles, then scores its
+    confidence (0–10) against a calibrated rubric.
 
     Returns a *task_id* that can be polled via **GET /verify-voe/{task_id}**.
 
     **Required fields:** `full_name`, `job_title`, `company`  
     **Optional fields:** `zip_code`, `city`, `country` (improve disambiguation)
+
+    **Provider options** (`provider` field):
+    - `gemini` *(default)* — Gemini with live Google Search grounding.
+    - `openai` — OpenAI Responses API with web_search tool.
+    - `both` — Runs both concurrently. Returns each provider's result plus a
+      `best_result` chosen by the highest `confidence_score`.
+
+    When `provider=both`, both `GEMINI_API_KEY` and `OPENAI_API_KEY` must be set.
     """
     task_id = str(uuid.uuid4())
     task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
@@ -592,7 +691,7 @@ async def create_voe_task(
 
     background_tasks.add_task(_process_voe_task, task_id, request)
 
-    return {"task_id": task_id, "status": "IN_PROGRESS"}
+    return {"task_id": task_id, "status": "IN_PROGRESS", "provider": request.provider}
 
 
 @router.get("/verify-voe/failed/", summary="List failed VOE verification tasks")
@@ -713,12 +812,13 @@ async def create_combined_search_task(
     request: CombinedSearchRequest,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
 ):
     """
     Enqueue an asynchronous combined search job for the given company.
-    
+
     This calls both the OpenAI and Gemini pipelines concurrently and aggregates their results.
-    
+
     Returns a *task_id* that can be polled via **GET /combined-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
