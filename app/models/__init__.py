@@ -22,6 +22,7 @@ from .models import (
     TaggedContact,
     ContactTag,
     StructuredAddress,
+    HintAddress,
     PdfExtractionResult,
     BgCheckFields,
     BgCheckParseResult,

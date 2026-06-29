@@ -231,6 +231,38 @@ class StructuredAddress(BaseModel):
         """Fuzzy-resolve LLM tag labels; falls back to OTHERS on no match."""
         return _resolve_contact_tag(v)
 
+
+class HintAddress(BaseModel):
+    """
+    Optional address hint supplied by the caller to help the LLM disambiguate
+    between companies that share the same name.
+
+    This is an *input-only* model — it intentionally omits ``tag`` and
+    ``context`` (which are output-side concepts on ``StructuredAddress``).
+    All fields default to an empty string; supply only what you know.
+    """
+    address1: str = Field(default="", description="Street address line 1 (e.g., '123 Main St')")
+    address2: str = Field(default="", description="Street address line 2 (e.g., 'Suite 400')")
+    city: str = Field(default="", description="City name")
+    state: str = Field(default="", description="State or province (e.g., 'TX', 'Ontario')")
+    zip: str = Field(default="", description="Postal / ZIP code")
+    country: str = Field(default="", description="Country name (e.g., 'United States')")
+
+    def to_prompt_string(self) -> str:
+        """Render as a human-readable single-line string for LLM prompt injection.
+
+        Only non-empty fields are included, joined by commas.
+        Returns an empty string when no fields are set.
+        """
+        parts = [
+            p for p in [
+                self.address1, self.address2, self.city,
+                self.state, self.zip, self.country,
+            ]
+            if p.strip()
+        ]
+        return ", ".join(parts)
+
 # --- Legacy / Result Models ---
 class ContactInfo(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
@@ -303,6 +335,19 @@ class OpenAISearchRequest(BaseModel):
     zip_code: Optional[str] = None
     url: Optional[str] = None
     max_limit: Optional[int] = None
+    # --- Disambiguation hints (input-only) ---
+    phone: Optional[str] = Field(
+        default=None,
+        description="Known phone number for this company — used to disambiguate companies with the same name.",
+    )
+    fax: Optional[str] = Field(
+        default=None,
+        description="Known fax number for this company — used as a disambiguation anchor.",
+    )
+    address: Optional[HintAddress] = Field(
+        default=None,
+        description="Partial or full known address — used to confirm the correct company entity.",
+    )
 
 
 class OpenAICompanyInfo(BaseModel):
@@ -335,6 +380,19 @@ class GeminiSearchRequest(BaseModel):
     zip_code: Optional[str] = None
     url: Optional[str] = None
     max_limit: Optional[int] = None
+    # --- Disambiguation hints (input-only) ---
+    phone: Optional[str] = Field(
+        default=None,
+        description="Known phone number for this company — used to disambiguate companies with the same name.",
+    )
+    fax: Optional[str] = Field(
+        default=None,
+        description="Known fax number for this company — used as a disambiguation anchor.",
+    )
+    address: Optional[HintAddress] = Field(
+        default=None,
+        description="Partial or full known address — used to confirm the correct company entity.",
+    )
 
 
 class GeminiCompanyInfo(BaseModel):
@@ -427,6 +485,19 @@ class CombinedSearchRequest(BaseModel):
     zip_code: Optional[str] = None
     url: Optional[str] = None
     max_limit: Optional[int] = None
+    # --- Disambiguation hints (input-only) ---
+    phone: Optional[str] = Field(
+        default=None,
+        description="Known phone number for this company — used to disambiguate companies with the same name.",
+    )
+    fax: Optional[str] = Field(
+        default=None,
+        description="Known fax number for this company — used as a disambiguation anchor.",
+    )
+    address: Optional[HintAddress] = Field(
+        default=None,
+        description="Partial or full known address — used to confirm the correct company entity.",
+    )
 
 
 class CombinedCompanyInfo(BaseModel):

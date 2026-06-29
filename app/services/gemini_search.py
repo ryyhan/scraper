@@ -59,7 +59,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.models import ContactTag
+from app.models import ContactTag, HintAddress
 from app.services._retry import retry_gemini
 
 T = TypeVar("T", bound=BaseModel)
@@ -157,19 +157,33 @@ class GeminiSearchService:
         zip_code: str | None = getattr(request, "zip_code", None)
         url: str | None = getattr(request, "url", None)
         max_limit: int | None = getattr(request, "max_limit", None)
+        phone: str | None = getattr(request, "phone", None)
+        fax: str | None = getattr(request, "fax", None)
+        address: HintAddress | None = getattr(request, "address", None)
+
+        # Sanitize string-typed fields: treat any value that is clearly a
+        # Swagger UI placeholder or non-meaningful input as None so it is
+        # never injected into LLM prompts.
+        # zip_code must contain at least one digit to be a real postal code.
+        if zip_code and not any(c.isdigit() for c in zip_code):
+            zip_code = None
+        # url must begin with a valid scheme; 'string', 'null', bare hostnames, etc. are rejected.
+        if url and not url.strip().startswith(("http://", "https://")):
+            url = None
 
         logger.info(f"[GeminiSearchService] Starting research for: {company_name!r}")
 
         target_context = self._build_context(company_name, country, zip_code, url)
+        hint_block = self._build_hint_block(company_name, country, phone, fax, address)
 
         # ── Step 1: Parallel Deep Research (The "Gatherer") ───────────────────
-        research_text = self._gather(target_context, company_name, url)
+        research_text = self._gather(target_context, company_name, url, hint_block)
 
         # ── Step 2: Extraction (The "Extractor") ──────────────────────────────
         result: T = self._extract(research_text, company_name, model_class)
 
         # ── Step 3: Verification (The "Verifier") ─────────────────────────────
-        result = self._verify(research_text, result, company_name, model_class)
+        result = self._verify(research_text, result, company_name, model_class, country)
 
         if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
             result.company_info.phones = result.company_info.phones[:max_limit]
@@ -191,7 +205,7 @@ class GeminiSearchService:
         zip_code: str | None,
         url: str | None,
     ) -> str:
-        """Assemble a concise, pipe-separated context string from available fields."""
+        """Assemble a concise, pipe-separated identity context string from available fields."""
         parts = [f"Company: {company_name}"]
         if country:
             parts.append(f"Country: {country}")
@@ -201,11 +215,62 @@ class GeminiSearchService:
             parts.append(f"URL: {url}")
         return " | ".join(parts)
 
+    @staticmethod
+    def _build_hint_block(
+        company_name: str,
+        country: str | None,
+        phone: str | None,
+        fax: str | None,
+        address: HintAddress | None,
+    ) -> str:
+        """
+        Compose the mandatory entity-filter + disambiguation paragraph injected
+        into Sub-gatherer 1 (HR/General).
+
+        Guards:
+        - Phone/fax values are silently skipped when they contain no digit
+          characters (e.g. Swagger UI placeholder 'string').
+        - Returns an empty string when no meaningful hints are present so the
+          prompt is identical to pre-feature behaviour (full backward-compat).
+        """
+        identity_lines: list[str] = []
+        if country:
+            identity_lines.append(f"  Country      : {country}")
+        # Only inject phone/fax when they contain at least one digit — silently
+        # ignores Swagger UI placeholder values like 'string'.
+        if phone and any(c.isdigit() for c in phone):
+            identity_lines.append(f"  Known phone  : {phone}")
+        if fax and any(c.isdigit() for c in fax):
+            identity_lines.append(f"  Known fax    : {fax}")
+        if address:
+            addr_str = address.to_prompt_string()
+            if addr_str:
+                identity_lines.append(f"  Known address: {addr_str}")
+
+        if not identity_lines:
+            return ""
+
+        country_note = f" in {country}" if country else ""
+        return (
+            f"\n⚠️  MANDATORY ENTITY FILTER — READ THIS BEFORE SEARCHING:\n"
+            f"You MUST ONLY research the specific '{company_name}' entity whose identity "
+            f"matches ALL of the following anchors. DO NOT research any other company "
+            f"that shares a similar or identical name.\n\n"
+            "Target identity anchors:\n"
+            + "\n".join(identity_lines)
+            + f"\n\nCRITICAL RULE: If your search returns results for a company with the same "
+            f"name{country_note} in a DIFFERENT country, region, or industry:\n"
+            "  1. IGNORE those results entirely — do NOT visit those pages.\n"
+            "  2. Do NOT extract ANY contact information from those entities.\n"
+            "  3. ONLY process sources that clearly belong to the target entity above.\n"
+        )
+
     def _gather(
         self,
         target_context: str,
         company_name: str,
         url: str | None = None,
+        hint_block: str = "",
     ) -> str:
         """
         Launch three parallel grounded sub-gatherers via ``ThreadPoolExecutor``
@@ -221,7 +286,7 @@ class GeminiSearchService:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(
-                    self._gather_hr_general, target_context, company_name, url
+                    self._gather_hr_general, target_context, company_name, url, hint_block
                 ): "HR/General",
                 executor.submit(
                     self._gather_directories_pdfs, target_context, company_name
@@ -314,6 +379,7 @@ class GeminiSearchService:
         target_context: str,
         company_name: str,
         url: str | None,
+        hint_block: str = "",
     ) -> str:
         """
         Sub-gatherer 1 — Broad HR / General / Admin / Business Directories.
@@ -322,6 +388,9 @@ class GeminiSearchService:
         BBB listings, and general business directory sites.  When *url* is
         provided, the model is instructed to crawl specific subpages of the
         official site as its first action (LLM-driven, no Python scraping).
+        When *hint_block* is non-empty, the disambiguation hints are injected
+        immediately after the target context so the model anchors on the
+        correct entity before searching.
         """
         url_instruction = ""
         if url:
@@ -342,6 +411,7 @@ class GeminiSearchService:
 
         prompt = (
             f"Deep research task: Find contact information for the following target:\n{target_context}\n"
+            f"{hint_block}"
             f"{url_instruction}\n"
             "SEARCH STRATEGY — run ALL of the following targeted searches in order:\n"
             f"  a) '{company_name} HR department phone email fax'\n"
@@ -553,6 +623,7 @@ class GeminiSearchService:
         extracted: T,
         company_name: str,
         model_class: Type[T],
+        country: str | None = None,
     ) -> T:
         """
         Step 3 — Verify extracted contacts against the raw research text.
@@ -569,6 +640,19 @@ class GeminiSearchService:
 
         extracted_json = extracted.model_dump_json(indent=2)
 
+        # Build an optional geographic/entity pre-filter line for the verifier.
+        # This is the last line of defence against contacts from same-name entities
+        # in other countries that slipped through the gather stage.
+        geo_filter = ""
+        if country:
+            geo_filter = (
+                f"  GEOGRAPHIC/ENTITY FILTER: The target company is located in '{country}'. "
+                f"REMOVE any contact whose 'context' field, source URL, or surrounding "
+                f"research text explicitly associates it with a company in a DIFFERENT country "
+                f"or clearly identifies it as a different legal entity (e.g., a subsidiary or "
+                f"affiliate with the same name in another country). When in doubt, keep it.\n"
+            )
+
         verification_prompt = (
             f"You are a precise fact-checker for contact information about '{company_name}'.\n\n"
             "You will be given:\n"
@@ -578,7 +662,9 @@ class GeminiSearchService:
             "PRE-FILTER (apply FIRST, before all other rules):\n"
             "  ALWAYS REMOVE any email whose value is '[email protected]' or contains "
             "'cloudflare' in its domain. These are Cloudflare email-obfuscation placeholders, "
-            "never real contact addresses.\n\n"
+            "never real contact addresses.\n"
+            + geo_filter
+            + "\n"
             "PHONE AND FAX NUMBER MATCHING — CRITICAL RULE:\n"
             "  When checking whether a phone or fax number appears in the research text, "
             "NORMALIZE both the extracted value AND the research text by stripping ALL "
