@@ -178,3 +178,5 @@ Combined ceiling: 3 (tenacity) × 3 (SDK) = 9 max API calls per logical request.
 
 ### SQLite Concurrency
 SQLite is configured with WAL journal mode, `busy_timeout=30 000 ms`, and `synchronous=NORMAL` — allowing concurrent reads during writes and tolerating short lock contention without raising `SQLITE_BUSY` errors.
+
+#### v1.0
