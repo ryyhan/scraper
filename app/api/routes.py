@@ -78,8 +78,8 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                         text = await scraper.extract_page_text(link)
                         combined_text += f"\n--- Source: {link} ---\n{text}\n"
 
-                    if len(combined_text) > 15000:
-                        combined_text = combined_text[:15000]
+                    if len(combined_text) > 60000:
+                        combined_text = combined_text[:60000]
 
                     # 5. Extract Contact Info
                     contact_info = await llm_client.extract_contact_info(combined_text)
