@@ -54,11 +54,11 @@ from app.services._retry import retry_gemini
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+_GEMINI_MODEL: str = settings.GEMINI_MODEL
 """Gemini model used for both research and structured-extraction calls.
 
-Swap to ``gemini-2.5-pro`` for higher accuracy at greater cost — no other
-code changes are required.
+Override via GEMINI_MODEL in your .env file (e.g. GEMINI_MODEL=gemini-2.5-pro).
+Defaults to the value in Settings.GEMINI_MODEL (currently "gemini-2.5-flash-lite").
 """
 
 _SCORE_RUBRIC: str = """\
@@ -141,6 +141,30 @@ class VoeVerificationService:
 
         # ── Step 1: Web Research (The "Investigator") ─────────────────────
         raw_evidence = self._investigate(client, subject_context, request)
+
+        # Guard: if grounding returned nothing (safety filter, blocked content,
+        # or a transient API issue), skip Step 2 to avoid a wasted LLM call.
+        # Return a deterministic UNVERIFIED result so the caller always gets a
+        # well-formed response rather than an opaque error.
+        if not raw_evidence.strip():
+            logger.warning(
+                f"[VoeVerificationService] Step 1 returned empty evidence for "
+                f"{request.full_name!r} @ {request.company!r} — "
+                "likely a safety filter or blocked content. Returning UNVERIFIED."
+            )
+            return VoeVerificationResult(
+                full_name=request.full_name,
+                company=request.company,
+                job_title=request.job_title,
+                confidence_score=0.0,
+                verdict="UNVERIFIED",
+                evidence_summary=(
+                    "No evidence could be gathered from web sources. "
+                    "The search may have been blocked or returned no results. "
+                    "Manual verification is recommended."
+                ),
+                sources_found=[],
+            )
 
         # ── Step 2: Structured Scoring (The "Analyst") ────────────────────
         result = self._analyse(client, raw_evidence, request)
@@ -315,5 +339,11 @@ class VoeVerificationService:
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:
-        """Remove Markdown code fences that occasionally wrap the model's JSON output."""
-        return re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        """Remove Markdown code fences that occasionally wrap the model's JSON output.
+
+        Note: re.MULTILINE is intentionally NOT used here.  Without it, ``^``
+        and ``$`` anchor to the very start and end of the full string, which is
+        the correct behaviour — we only want to strip the outermost fence pair,
+        not every line that happens to begin or end with triple backticks.
+        """
+        return re.sub(r"^```(?:json)?\s*\n?|\n?\s*```$", "", text.strip())

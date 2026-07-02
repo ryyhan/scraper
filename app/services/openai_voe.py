@@ -282,11 +282,40 @@ class OpenAIVoeService:
 
         response = _call()
 
-        raw_json = self._strip_markdown_fences(response.output_text or "{}")
+        raw_json = self._strip_markdown_fences(response.output_text or "")
+
+        # Guard: if the model returned nothing or only whitespace, return a
+        # deterministic UNVERIFIED result rather than letting model_validate({})
+        # raise an opaque pydantic.ValidationError citing missing required fields.
+        if not raw_json:
+            logger.warning(
+                f"[OpenAIVoeService] Step 2 returned empty output for "
+                f"{request.full_name!r} — returning UNVERIFIED default."
+            )
+            return VoeVerificationResult(
+                full_name=request.full_name,
+                company=request.company,
+                job_title=request.job_title,
+                confidence_score=0.0,
+                verdict="UNVERIFIED",
+                evidence_summary=(
+                    "The structured scoring step returned an empty response. "
+                    "Evidence gathered in Step 1 could not be scored. "
+                    "Manual verification is recommended."
+                ),
+                sources_found=[],
+            )
+
         data = json.loads(raw_json)
         return VoeVerificationResult.model_validate(data)
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:
-        """Remove Markdown code fences that occasionally wrap the model's JSON output."""
-        return re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        """Remove Markdown code fences that occasionally wrap the model's JSON output.
+
+        Note: re.MULTILINE is intentionally NOT used here.  Without it, ``^``
+        and ``$`` anchor to the very start and end of the full string, which is
+        the correct behaviour — we only want to strip the outermost fence pair,
+        not every line that happens to begin or end with triple backticks.
+        """
+        return re.sub(r"^```(?:json)?\s*\n?|\n?\s*```$", "", text.strip())
