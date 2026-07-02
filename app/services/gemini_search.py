@@ -59,7 +59,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.models import ContactTag
+from app.models import ContactTag, HintAddress
 from app.services._retry import retry_gemini
 
 T = TypeVar("T", bound=BaseModel)
@@ -157,19 +157,57 @@ class GeminiSearchService:
         zip_code: str | None = getattr(request, "zip_code", None)
         url: str | None = getattr(request, "url", None)
         max_limit: int | None = getattr(request, "max_limit", None)
+        phone: str | None = getattr(request, "phone", None)
+        fax: str | None = getattr(request, "fax", None)
+        address: HintAddress | None = getattr(request, "address", None)
+
+        # Sanitize string-typed fields: treat any value that is clearly a
+        # Swagger UI placeholder or non-meaningful input as None so it is
+        # never injected into LLM prompts.
+        # zip_code must contain at least one digit to be a real postal code.
+        if zip_code and not any(c.isdigit() for c in zip_code):
+            zip_code = None
+        # url must begin with a valid scheme; 'string', 'null', bare hostnames, etc. are rejected.
+        if url and not url.strip().startswith(("http://", "https://")):
+            url = None
 
         logger.info(f"[GeminiSearchService] Starting research for: {company_name!r}")
 
         target_context = self._build_context(company_name, country, zip_code, url)
+        hint_block = self._build_hint_block(company_name, country, zip_code, phone, fax, address)
 
         # ── Step 1: Parallel Deep Research (The "Gatherer") ───────────────────
-        research_text = self._gather(target_context, company_name, url)
+        research_text = self._gather(target_context, company_name, url, hint_block)
 
-        # ── Step 2: Extraction (The "Extractor") ──────────────────────────────
-        result: T = self._extract(research_text, company_name, model_class)
+        # Build entity scope note from ALL populated anchors for Steps 2 and 3.
+        _clean_phone = phone if (phone and any(c.isdigit() for c in phone)) else None
+        _clean_fax   = fax   if (fax   and any(c.isdigit() for c in fax))   else None
+        _anchor_parts: list[str] = []
+        if country:       _anchor_parts.append(f"Country: {country}")
+        if zip_code:      _anchor_parts.append(f"Zip Code: {zip_code}")
+        if _clean_phone:  _anchor_parts.append(f"Phone: {_clean_phone}")
+        if _clean_fax:    _anchor_parts.append(f"Fax: {_clean_fax}")
+        if address:
+            _addr_str = address.to_prompt_string()
+            if _addr_str: _anchor_parts.append(f"Address: {_addr_str}")
+
+        entity_scope_note = ""
+        if _anchor_parts:
+            _anchor_summary = " | ".join(_anchor_parts)
+            entity_scope_note = (
+                f"\n\u26a0\ufe0f  ENTITY SCOPE CONSTRAINT — IMPORTANT:\n"
+                f"The research may contain data from MULTIPLE organizations named '{company_name}'.\n"
+                f"You are ONLY processing the specific entity that matches ALL of the following known anchors:\n"
+                f"  {_anchor_summary}\n"
+                f"EXCLUDE any contact that clearly belongs to a DIFFERENT '{company_name}' organization.\n"
+                f"When the entity is ambiguous, default to KEEP.\n"
+            )
+
+        # ── Step 2: Extraction (The "Extractor") ───────────────────────────
+        result: T = self._extract(research_text, company_name, model_class, entity_scope_note)
 
         # ── Step 3: Verification (The "Verifier") ─────────────────────────────
-        result = self._verify(research_text, result, company_name, model_class)
+        result = self._verify(research_text, result, company_name, model_class, entity_scope_note)
 
         if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
             result.company_info.phones = result.company_info.phones[:max_limit]
@@ -191,7 +229,7 @@ class GeminiSearchService:
         zip_code: str | None,
         url: str | None,
     ) -> str:
-        """Assemble a concise, pipe-separated context string from available fields."""
+        """Assemble a concise, pipe-separated identity context string from available fields."""
         parts = [f"Company: {company_name}"]
         if country:
             parts.append(f"Country: {country}")
@@ -201,11 +239,101 @@ class GeminiSearchService:
             parts.append(f"URL: {url}")
         return " | ".join(parts)
 
+    @staticmethod
+    def _build_hint_block(
+        company_name: str,
+        country: str | None,
+        zip_code: str | None,
+        phone: str | None,
+        fax: str | None,
+        address: HintAddress | None,
+    ) -> str:
+        """
+        Compose the entity-filter block injected at the top of Sub-gatherer 1.
+        ALL populated fields are included as identity anchors.  The most specific
+        available anchor drives an active STEP 1 / STEP 2 discovery sequence
+        (identical strategy to OpenAISearchService._build_hint_block).
+        Returns empty string when no meaningful hints are present.
+        """
+        clean_phone: str | None = phone if (phone and any(c.isdigit() for c in phone)) else None
+        clean_fax:   str | None = fax   if (fax   and any(c.isdigit() for c in fax))   else None
+
+        identity_lines: list[str] = []
+        if country:      identity_lines.append(f"  Country      : {country}")
+        if zip_code:     identity_lines.append(f"  Zip Code     : {zip_code}")
+        if clean_phone:  identity_lines.append(f"  Known phone  : {clean_phone}")
+        if clean_fax:    identity_lines.append(f"  Known fax    : {clean_fax}")
+        if address:
+            addr_str = address.to_prompt_string()
+            if addr_str:
+                identity_lines.append(f"  Known address: {addr_str}")
+
+        if not identity_lines:
+            return ""
+
+        country_note = f" in {country}" if country else ""
+
+        if clean_phone:
+            step1_lines = (
+                f"STEP 1 (REQUIRED FIRST ACTION — do this before anything else):\n"
+                f"  Search for the known phone number to pinpoint the EXACT entity:\n"
+                f"  \u2192 Search: \"{clean_phone}\"\n"
+                f"  \u2192 The organization that owns this phone number is your ONLY research target.\n"
+                f"  \u2192 Note its exact legal name and city/state before proceeding.\n\n"
+            )
+        elif address and address.city and address.state:
+            step1_lines = (
+                f"STEP 1 (REQUIRED FIRST ACTION — do this before anything else):\n"
+                f"  Search for the company using its known city and state:\n"
+                f"  \u2192 Search: \"{company_name}\" \"{address.city}\" \"{address.state}\"\n"
+                f"  \u2192 Use the result to confirm the exact entity at this location.\n"
+                f"  \u2192 Note its exact legal name before proceeding.\n\n"
+            )
+        elif zip_code:
+            step1_lines = (
+                f"STEP 1 (REQUIRED FIRST ACTION — do this before anything else):\n"
+                f"  Search for the company using its known zip code:\n"
+                f"  \u2192 Search: \"{company_name}\" \"{zip_code}\"\n"
+                f"  \u2192 Use the result to identify the exact entity in this zip code area.\n"
+                f"  \u2192 Note its exact legal name before proceeding.\n\n"
+            )
+        else:
+            step1_lines = None
+
+        if step1_lines:
+            return (
+                f"\n\u26a0\ufe0f  MANDATORY ENTITY IDENTIFICATION — FOLLOW THESE STEPS IN ORDER:\n\n"
+                + step1_lines
+                + f"STEP 2: Use ONLY the entity identified in Step 1 for ALL subsequent research.\n"
+                f"  \u2192 Search for additional contacts ONLY for that specific organization.\n"
+                f"  \u2192 Do NOT visit websites of any other '{company_name}' organization.\n\n"
+                "All known identity anchors (ALL must match the entity you research):\n"
+                + "\n".join(identity_lines)
+                + f"\n\nCRITICAL: There may be many organizations named '{company_name}'{country_note}. "
+                f"You MUST ONLY research the specific one confirmed by the anchors above. "
+                f"ALL other '{company_name}' organizations are completely irrelevant — "
+                f"do NOT visit their websites or extract any of their contacts.\n"
+            )
+        else:
+            return (
+                f"\n\u26a0\ufe0f  MANDATORY ENTITY FILTER — READ THIS BEFORE SEARCHING:\n"
+                f"You MUST ONLY research the specific '{company_name}' entity whose identity "
+                f"matches ALL of the following anchors.\n\n"
+                "Target identity anchors:\n"
+                + "\n".join(identity_lines)
+                + f"\n\nCRITICAL RULE: If your search returns results for a company with the same "
+                f"name{country_note} in a DIFFERENT country, region, or industry:\n"
+                "  1. IGNORE those results entirely.\n"
+                "  2. Do NOT extract ANY contact information from those entities.\n"
+                "  3. ONLY process sources that clearly belong to the target entity above.\n"
+            )
+
     def _gather(
         self,
         target_context: str,
         company_name: str,
         url: str | None = None,
+        hint_block: str = "",
     ) -> str:
         """
         Launch three parallel grounded sub-gatherers via ``ThreadPoolExecutor``
@@ -221,7 +349,7 @@ class GeminiSearchService:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(
-                    self._gather_hr_general, target_context, company_name, url
+                    self._gather_hr_general, target_context, company_name, url, hint_block
                 ): "HR/General",
                 executor.submit(
                     self._gather_directories_pdfs, target_context, company_name
@@ -314,6 +442,7 @@ class GeminiSearchService:
         target_context: str,
         company_name: str,
         url: str | None,
+        hint_block: str = "",
     ) -> str:
         """
         Sub-gatherer 1 — Broad HR / General / Admin / Business Directories.
@@ -322,6 +451,9 @@ class GeminiSearchService:
         BBB listings, and general business directory sites.  When *url* is
         provided, the model is instructed to crawl specific subpages of the
         official site as its first action (LLM-driven, no Python scraping).
+        When *hint_block* is non-empty, the disambiguation hints are injected
+        immediately after the target context so the model anchors on the
+        correct entity before searching.
         """
         url_instruction = ""
         if url:
@@ -342,6 +474,7 @@ class GeminiSearchService:
 
         prompt = (
             f"Deep research task: Find contact information for the following target:\n{target_context}\n"
+            f"{hint_block}"
             f"{url_instruction}\n"
             "SEARCH STRATEGY — run ALL of the following targeted searches in order:\n"
             f"  a) '{company_name} HR department phone email fax'\n"
@@ -473,17 +606,19 @@ class GeminiSearchService:
         research_text: str,
         company_name: str,
         model_class: Type[T],
+        entity_anchor_note: str = "",
     ) -> T:
         """
         Step 2 — Distil the raw research into a structured Pydantic model.
 
-        Uses Gemini's native structured-output capability: the response is
-        constrained to a JSON object that strictly matches *model_class*'s
-        schema.  The SDK auto-parses it into the model via ``.parsed``.
+        When *entity_anchor_note* is non-empty (i.e. caller supplied phone/
+        address hints) it is prepended to the extraction prompt so the LLM
+        only extracts contacts from the anchor-matched entity.
         """
         extraction_prompt = (
             f"Based on the following research about '{company_name}':\n\n"
             f"{research_text}\n\n"
+            f"{entity_anchor_note}\n"
             "TASK: Extract the contact information into the required JSON schema.\n"
             "STRICT RULES:\n"
             "1. Extract ALL valid emails, phone numbers, fax numbers, and physical "
@@ -553,6 +688,7 @@ class GeminiSearchService:
         extracted: T,
         company_name: str,
         model_class: Type[T],
+        entity_filter_note: str = "",
     ) -> T:
         """
         Step 3 — Verify extracted contacts against the raw research text.
@@ -569,6 +705,16 @@ class GeminiSearchService:
 
         extracted_json = extracted.model_dump_json(indent=2)
 
+        # entity_filter_note is built upstream from ALL populated anchors and
+        # is injected as the first rule in the verifier prompt.
+        entity_filter = (
+            entity_filter_note.replace(
+                "\u26a0\ufe0f  ENTITY SCOPE CONSTRAINT — IMPORTANT:",
+                "  ENTITY SCOPE CONSTRAINT:",
+            ).strip()
+            + "\n"
+        ) if entity_filter_note.strip() else ""
+
         verification_prompt = (
             f"You are a precise fact-checker for contact information about '{company_name}'.\n\n"
             "You will be given:\n"
@@ -578,7 +724,9 @@ class GeminiSearchService:
             "PRE-FILTER (apply FIRST, before all other rules):\n"
             "  ALWAYS REMOVE any email whose value is '[email protected]' or contains "
             "'cloudflare' in its domain. These are Cloudflare email-obfuscation placeholders, "
-            "never real contact addresses.\n\n"
+            "never real contact addresses.\n"
+            + entity_filter
+            + "\n"
             "PHONE AND FAX NUMBER MATCHING — CRITICAL RULE:\n"
             "  When checking whether a phone or fax number appears in the research text, "
             "NORMALIZE both the extracted value AND the research text by stripping ALL "
