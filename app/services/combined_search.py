@@ -21,6 +21,8 @@ from app.models import (
     GeminiSearchResult,
     TaggedContact,
     StructuredAddress,
+    ProviderTokenUsage,
+    TokenUsage,
 )
 from app.services.openai_search import OpenAISearchService
 from app.services.gemini_search import GeminiSearchService
@@ -173,6 +175,27 @@ class CombinedSearchService:
             ),
         )
 
+        # --- Aggregate token usage from both providers ---
+        openai_provider_usage: Optional[ProviderTokenUsage] = (
+            openai_result.token_usage.openai
+            if openai_result and openai_result.token_usage and openai_result.token_usage.openai
+            else None
+        )
+        gemini_provider_usage: Optional[ProviderTokenUsage] = (
+            gemini_result.token_usage.gemini
+            if gemini_result and gemini_result.token_usage and gemini_result.token_usage.gemini
+            else None
+        )
+        grand_total = (
+            (openai_provider_usage or ProviderTokenUsage())
+            + (gemini_provider_usage or ProviderTokenUsage())
+        )
+        combined_token_usage = TokenUsage(
+            openai=openai_provider_usage,
+            gemini=gemini_provider_usage,
+            grand_total=grand_total,
+        )
+
         logger.info(
             f"[CombinedSearchService] Completed combined research for: {company_name!r} | "
             f"OpenAI(phones={openai_stats.total_phones}, faxes={openai_stats.total_faxes}, "
@@ -180,7 +203,10 @@ class CombinedSearchService:
             f"Gemini(phones={gemini_stats.total_phones}, faxes={gemini_stats.total_faxes}, "
             f"emails={gemini_stats.total_emails}, addresses={gemini_stats.total_addresses}) | "
             f"Combined(phones={summary.combined.total_phones}, faxes={summary.combined.total_faxes}, "
-            f"emails={summary.combined.total_emails}, addresses={summary.combined.total_addresses})"
+            f"emails={summary.combined.total_emails}, addresses={summary.combined.total_addresses}) | "
+            f"tokens(openai={openai_provider_usage.total_tokens if openai_provider_usage else 0}, "
+            f"gemini={gemini_provider_usage.total_tokens if gemini_provider_usage else 0}, "
+            f"grand_total={grand_total.total_tokens})"
         )
         return CombinedSearchResult(
             company_name=company_name,
@@ -189,4 +215,5 @@ class CombinedSearchService:
             summary=summary,
             openai_result=openai_result,
             gemini_result=gemini_result,
+            token_usage=combined_token_usage,
         )

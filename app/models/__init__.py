@@ -26,4 +26,6 @@ from .models import (
     PdfExtractionResult,
     BgCheckFields,
     BgCheckParseResult,
+    ProviderTokenUsage,
+    TokenUsage,
 )

@@ -6,6 +6,44 @@ from loguru import logger
 import re
 from enum import Enum
 
+
+# ---------------------------------------------------------------------------
+# Token Usage Models
+# ---------------------------------------------------------------------------
+
+class ProviderTokenUsage(BaseModel):
+    """
+    Normalized token counts for a single provider's full pipeline run.
+
+    All three fields use the same names regardless of provider — OpenAI's
+    ``input_tokens``/``output_tokens`` and Gemini's
+    ``prompt_token_count``/``candidates_token_count`` are both mapped here.
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+    def __add__(self, other: "ProviderTokenUsage") -> "ProviderTokenUsage":
+        """Accumulate two usage snapshots into one (used when summing pipeline steps)."""
+        return ProviderTokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+        )
+
+
+class TokenUsage(BaseModel):
+    """
+    Aggregated token usage across all providers for one pipeline execution.
+
+    For single-provider endpoints (openai-search, gemini-search, verify-voe)
+    only the matching provider field is populated; the other is ``None``.
+    For combined-search both are populated and ``grand_total`` is their sum.
+    """
+    openai: Optional[ProviderTokenUsage] = None
+    gemini: Optional[ProviderTokenUsage] = None
+    grand_total: ProviderTokenUsage = Field(default_factory=ProviderTokenUsage)
+
 # --- API Request Model ---
 class SearchRequest(BaseModel):
     poe_name: str
@@ -369,6 +407,10 @@ class OpenAISearchResult(BaseModel):
     company_name: str
     official_site: str = ""
     company_info: OpenAICompanyInfo = Field(default_factory=OpenAICompanyInfo)
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Token consumption breakdown for this pipeline run (populated on task completion).",
+    )
 
 
 # --- Gemini Search Models ---
@@ -413,6 +455,10 @@ class GeminiSearchResult(BaseModel):
     company_name: str
     official_site: str = ""
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Token consumption breakdown for this pipeline run (populated on task completion).",
+    )
 
 
 # --- VOE (Verification of Employment) Models ---
@@ -445,6 +491,10 @@ class VoeVerificationResult(BaseModel):
     verdict: Literal["VERIFIED", "LIKELY", "UNVERIFIED", "CONTRADICTED"]
     evidence_summary: str       # 2–3 sentence human-readable explanation
     sources_found: List[str]    # URLs or source names used as evidence
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Token consumption breakdown for this pipeline run (populated on task completion).",
+    )
 
 
 class VoeProviderResult(BaseModel):
@@ -474,6 +524,10 @@ class CombinedVoeResult(BaseModel):
     )
     gemini: VoeProviderResult
     openai: VoeProviderResult
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Aggregated token consumption from both providers (populated on task completion).",
+    )
 
 
 # --- Combined Search Models ---
@@ -543,6 +597,10 @@ class CombinedSearchResult(BaseModel):
     summary: CombinedSearchSummary = Field(default_factory=CombinedSearchSummary)
     openai_result: Optional[OpenAISearchResult] = None
     gemini_result: Optional[GeminiSearchResult] = None
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Aggregated token consumption from both providers (populated on task completion).",
+    )
 
 
 # --- External Webhook Payload Model ---

@@ -609,6 +609,23 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
             candidates = [r for r in (gemini_res, openai_res) if r is not None]
             best = max(candidates, key=lambda r: r.confidence_score)
 
+            # Aggregate token usage from both providers
+            from app.models import ProviderTokenUsage, TokenUsage
+            openai_prov_usage: ProviderTokenUsage | None = (
+                openai_res.token_usage.openai
+                if openai_res and openai_res.token_usage and openai_res.token_usage.openai
+                else None
+            )
+            gemini_prov_usage: ProviderTokenUsage | None = (
+                gemini_res.token_usage.gemini
+                if gemini_res and gemini_res.token_usage and gemini_res.token_usage.gemini
+                else None
+            )
+            voe_grand_total = (
+                (openai_prov_usage or ProviderTokenUsage())
+                + (gemini_prov_usage or ProviderTokenUsage())
+            )
+
             combined = CombinedVoeResult(
                 full_name=request.full_name,
                 company=request.company,
@@ -623,6 +640,11 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
                     provider="openai",
                     result=openai_res,
                     error=openai_err,
+                ),
+                token_usage=TokenUsage(
+                    openai=openai_prov_usage,
+                    gemini=gemini_prov_usage,
+                    grand_total=voe_grand_total,
                 ),
             )
 
