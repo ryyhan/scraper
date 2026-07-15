@@ -405,6 +405,14 @@ class OpenAICompanyInfo(BaseModel):
 class OpenAISearchResult(BaseModel):
     """Full response envelope returned by the /openai-search/ endpoint."""
     company_name: str
+    official_company_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Legal/official company name as resolved by the LLM from live web sources "
+            "(e.g. 'Troopr Inc.' vs. the queried 'Troopr'). "
+            "Falls back to company_name if the LLM could not determine the official name."
+        ),
+    )
     official_site: str = ""
     company_info: OpenAICompanyInfo = Field(default_factory=OpenAICompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
@@ -453,6 +461,14 @@ class GeminiCompanyInfo(BaseModel):
 class GeminiSearchResult(BaseModel):
     """Full response envelope returned by the /gemini-search/ endpoint."""
     company_name: str
+    official_company_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Legal/official company name as resolved by the LLM from live web sources "
+            "(e.g. 'Troopr Inc.' vs. the queried 'Troopr'). "
+            "Falls back to company_name if the LLM could not determine the official name."
+        ),
+    )
     official_site: str = ""
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
@@ -592,6 +608,13 @@ class CombinedSearchSummary(BaseModel):
 class CombinedSearchResult(BaseModel):
     """Full response envelope returned by the /combined-search/ endpoint."""
     company_name: str
+    official_company_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Legal/official company name as resolved by the LLM from live web sources. "
+            "Prefers the OpenAI-resolved name, falls back to Gemini's, then to company_name."
+        ),
+    )
     official_site: str = ""
     company_info: CombinedCompanyInfo = Field(default_factory=CombinedCompanyInfo)
     summary: CombinedSearchSummary = Field(default_factory=CombinedSearchSummary)

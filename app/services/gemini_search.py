@@ -655,11 +655,15 @@ class GeminiSearchService:
             "   - Use 'context' to optionally provide the webpage section or text where it was found (e.g., 'Found on Careers page').\n"
             "2. For addresses, populate the structured fields (address1, address2, city, state, zip, country, countryCode).\n"
             f"3. Fill the 'company_name' key with the exact target name: {company_name}.\n"
-            "4. Fill 'official_site' with the primary official website URL if found, "
+            "4. Fill 'official_company_name' with the company's LEGAL/OFFICIAL registered name "
+            "as it appears on the official website, government records, SEC filings, or BBB listing "
+            f"(e.g. 'Troopr Inc.' not 'Troopr', or 'DEMOULAS MARKET BASKET INC.' not 'Market Basket'). "
+            f"If you cannot determine the legal name with confidence, copy the value of 'company_name' ({company_name}).\n"
+            "5. Fill 'official_site' with the primary official website URL if found, "
             "otherwise leave it as an empty string.\n"
-            "5. Return ONLY the extracted data values — do NOT return the schema itself.\n"
-            "6. If a field has no data, use an empty array [] or empty string \"\".\n"
-            "7. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "6. Return ONLY the extracted data values — do NOT return the schema itself.\n"
+            "7. If a field has no data, use an empty array [] or empty string \"\".\n"
+            "8. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -695,7 +699,11 @@ class GeminiSearchService:
         # `response_schema` is a Pydantic model class.
         if response.parsed is not None:
             logger.debug("[GeminiSearchService] Step 2: using SDK-parsed Pydantic object")
-            return response.parsed, step_usage  # type: ignore[return-value]
+            parsed = response.parsed
+            # Guarantee official_company_name is always populated on the parsed object.
+            if hasattr(parsed, "official_company_name") and not parsed.official_company_name:
+                parsed.official_company_name = company_name
+            return parsed, step_usage  # type: ignore[return-value]
 
         # Fallback: the SDK may return raw JSON text on some model/version
         # combinations.  Parse manually to guarantee a validated result.
@@ -707,7 +715,13 @@ class GeminiSearchService:
 
         raw_json_text = self._strip_markdown_fences(response.text or "{}")
         data = json.loads(raw_json_text)
-        return model_class.model_validate(data), step_usage
+        result = model_class.model_validate(data)
+
+        # Guarantee official_company_name is always populated on the manually-parsed result.
+        if hasattr(result, "official_company_name") and not result.official_company_name:
+            result.official_company_name = company_name
+
+        return result, step_usage
 
     def _verify(
         self,
@@ -780,7 +794,7 @@ class GeminiSearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', and 'official_site' fields unchanged.\n\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' fields unchanged.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
             f"EXTRACTED CONTACTS:\n{extracted_json}\n\n"
             "Return the filtered result in exactly the same JSON schema."

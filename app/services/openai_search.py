@@ -186,7 +186,11 @@ class OpenAISearchService:
             f"3. The response MUST be a VALID JSON object matching exactly this schema:\n{json.dumps(model_class.model_json_schema(), indent=2)}\n"
             f"4. IMPORTANT: DO NOT return the schema definition itself. Return the ACTUAL extracted data values.\n"
             f"5. Make sure to fill in the 'company_name' key with the target company: {company_name}.\n"
-            "6. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "6. Fill 'official_company_name' with the company's LEGAL/OFFICIAL registered name "
+            "as it appears on the official website, government records, SEC filings, or BBB listing "
+            f"(e.g. 'Troopr Inc.' not 'Troopr', or 'DEMOULAS MARKET BASKET INC.' not 'Market Basket'). "
+            f"If you cannot determine the legal name with confidence, copy the value of 'company_name' ({company_name}).\n"
+            "7. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -221,6 +225,11 @@ class OpenAISearchService:
             result.company_info.faxes = result.company_info.faxes[:max_limit]
             result.company_info.emails = result.company_info.emails[:max_limit]
             result.company_info.addresses = result.company_info.addresses[:max_limit]
+
+        # Guarantee official_company_name is always populated — fall back to the
+        # queried name if the LLM left it empty or the model class doesn't have the field.
+        if hasattr(result, "official_company_name") and not result.official_company_name:
+            result.official_company_name = company_name
 
         # ── Attach aggregated token usage ──────────────────────────────────────
         total_openai_usage = gather_usage + extract_usage + verify_usage
@@ -625,7 +634,7 @@ class OpenAISearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', and 'official_site' unchanged.\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' unchanged.\n"
             "- IMPORTANT: Return ONLY the filtered data values in the EXACT SAME JSON structure "
             "as EXTRACTED CONTACTS below. Do NOT return a schema or type definition.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"

@@ -208,8 +208,22 @@ class CombinedSearchService:
             f"gemini={gemini_provider_usage.total_tokens if gemini_provider_usage else 0}, "
             f"grand_total={grand_total.total_tokens})"
         )
+
+        # --- Resolve official company name (prefer OpenAI → Gemini → input fallback) ---
+        resolved_official_name: str = (
+            (openai_result.official_company_name if openai_result and openai_result.official_company_name else None)
+            or (gemini_result.official_company_name if gemini_result and gemini_result.official_company_name else None)
+            or company_name
+        )
+        if resolved_official_name != company_name:
+            logger.debug(
+                f"[CombinedSearchService] Resolved official name: "
+                f"{company_name!r} → {resolved_official_name!r}"
+            )
+
         return CombinedSearchResult(
             company_name=company_name,
+            official_company_name=resolved_official_name,
             official_site=official_site,
             company_info=company_info,
             summary=summary,
