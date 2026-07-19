@@ -178,6 +178,8 @@ class OpenAIVoeService:
         ]
         if request.city:
             parts.append(f"City: {request.city}")
+        if request.state:
+            parts.append(f"State: {request.state}")
         if request.zip_code:
             parts.append(f"Zip Code: {request.zip_code}")
         if request.country:

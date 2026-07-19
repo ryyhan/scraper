@@ -486,6 +486,7 @@ class VoeRequest(BaseModel):
     company: str            # e.g. "Acme Corp"
     zip_code: Optional[str] = None
     city: Optional[str] = None
+    state: Optional[str] = None
     country: Optional[str] = None
     provider: Literal["gemini", "openai", "both"] = "gemini"
     """LLM provider to use for employment verification.
@@ -543,6 +544,99 @@ class CombinedVoeResult(BaseModel):
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Aggregated token consumption from both providers (populated on task completion).",
+    )
+
+
+# --- Find POE (Find Place of Employment) Models ---
+
+class FindPoeRequest(BaseModel):
+    """Request body for the POST /find-poe/ endpoint."""
+    full_name: str = Field(description="Full name of the person whose employer you want to find.")
+    job_title: Optional[str] = Field(
+        default=None,
+        description="Known or suspected job title — narrows the search when provided.",
+    )
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = Field(
+        default="United States",
+        description="Country — used to scope the search. Defaults to 'United States'.",
+    )
+    provider: Literal["gemini", "openai", "both"] = "gemini"
+    """LLM provider to use for employer discovery.
+
+    - ``gemini``  (default) — Gemini with live Google Search grounding.
+    - ``openai``            — OpenAI Responses API with web_search tool.
+    - ``both``              — Runs both concurrently; returns each provider's
+                              full result plus a ``best_result`` from the
+                              provider whose top candidate scored highest.
+    """
+
+
+class CompanyCandidate(BaseModel):
+    """A single employer candidate discovered during a /find-poe/ run."""
+    company_name: str = Field(description="Name of the employer as found in public sources.")
+    confidence_score: float = Field(
+        description="Calibrated confidence (0.0–10.0) that this is the correct employer."
+    )
+    evidence_summary: str = Field(
+        description="2–3 sentence explanation of what was found and why this score was assigned."
+    )
+    sources_found: List[str] = Field(
+        default_factory=list,
+        description="URLs or named publications that support this candidate.",
+    )
+
+
+class FindPoeResult(BaseModel):
+    """Structured result returned by the /find-poe/ endpoint for a single provider."""
+    full_name: str
+    job_title: Optional[str] = None
+    best_match: Optional[CompanyCandidate] = Field(
+        default=None,
+        description="The highest-confidence employer candidate found.",
+    )
+    candidates: List[CompanyCandidate] = Field(
+        default_factory=list,
+        description="All employer candidates found, ranked by confidence_score descending.",
+    )
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Token consumption breakdown for this pipeline run.",
+    )
+
+
+class FindPoeProviderResult(BaseModel):
+    """A single provider's outcome within a combined /find-poe/ response."""
+    provider: Literal["gemini", "openai"]
+    result: Optional[FindPoeResult] = None
+    error: Optional[str] = Field(
+        default=None,
+        description="Set when this provider's pipeline failed; result will be null.",
+    )
+
+
+class CombinedFindPoeResult(BaseModel):
+    """
+    Full response envelope returned by POST /find-poe/ when ``provider='both'``.
+
+    ``best_result`` is the full :class:`FindPoeResult` from whichever provider's
+    top ``CompanyCandidate`` had the highest ``confidence_score``.
+    Both raw provider results are included so the caller can inspect evidence
+    from each source independently.
+    """
+    full_name: str
+    job_title: Optional[str] = None
+    best_result: Optional[FindPoeResult] = Field(
+        default=None,
+        description="The FindPoeResult from the provider whose top candidate scored highest.",
+    )
+    gemini: FindPoeProviderResult
+    openai: FindPoeProviderResult
+    token_usage: Optional[TokenUsage] = Field(
+        default=None,
+        description="Aggregated token consumption from both providers.",
     )
 
 

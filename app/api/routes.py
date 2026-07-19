@@ -14,6 +14,7 @@ from app.models import VoeRequest, VoeVerificationResult, VoeProviderResult, Com
 from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.models import PdfExtractionResult
 from app.models import BgCheckFields, BgCheckParseResult
+from app.models import FindPoeRequest, FindPoeResult, FindPoeProviderResult, CombinedFindPoeResult
 from app.api.deps import get_session
 from app.api.rate_limit import task_rate_limit
 from app.services import ScraperService, LLMService, WebhookService
@@ -23,6 +24,7 @@ from app.services import OpenAIVoeService
 from app.services import CombinedSearchService
 from app.services import PdfExtractorService
 from app.services import BgCheckParserService
+from app.services import GeminiFindPoeService, OpenAIFindPoeService
 from app.core.config import settings
 
 router = APIRouter()
@@ -1173,3 +1175,307 @@ async def parse_background_check(
         processing_time_seconds=elapsed,
         data=BgCheckFields(**fields_dict),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Find POE (Find Place of Employment) Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_find_poe_task(task_id: str, request: FindPoeRequest) -> None:
+    """
+    Background coroutine that routes to the correct provider pipeline(s)
+    based on ``request.provider`` then persists the result to the DB.
+
+    - ``gemini`` — single Gemini two-step pipeline.
+    - ``openai`` — single OpenAI two-step pipeline.
+    - ``both``   — both pipelines run concurrently via asyncio.gather;
+                   the provider whose top candidate scored highest is
+                   surfaced as ``best_result``.
+    """
+    provider = request.provider
+    logger.info(
+        f"[find-poe] Task {task_id}: starting (provider={provider!r}) for "
+        f"{request.full_name!r}"
+    )
+
+    status = "FAILURE"
+    message = "Unknown error"
+    result_data: dict = {
+        "full_name": request.full_name,
+        "job_title": request.job_title,
+    }
+
+    try:
+        if provider == "gemini":
+            # ── Single-provider: Gemini ────────────────────────────────────
+            service = GeminiFindPoeService()
+            result: FindPoeResult = await asyncio.to_thread(service.find, request)
+            status = "SUCCESS"
+            best = result.best_match
+            message = (
+                f"Employer discovery complete (gemini) – "
+                f"best={best.company_name!r} (score={best.confidence_score})"
+                if best else
+                "Employer discovery complete (gemini) – no candidates found"
+            )
+            result_data = result.model_dump()
+
+        elif provider == "openai":
+            # ── Single-provider: OpenAI ────────────────────────────────────
+            service_oai = OpenAIFindPoeService()
+            result_oai: FindPoeResult = await asyncio.to_thread(service_oai.find, request)
+            status = "SUCCESS"
+            best_oai = result_oai.best_match
+            message = (
+                f"Employer discovery complete (openai) – "
+                f"best={best_oai.company_name!r} (score={best_oai.confidence_score})"
+                if best_oai else
+                "Employer discovery complete (openai) – no candidates found"
+            )
+            result_data = result_oai.model_dump()
+
+        else:  # provider == "both"
+            # ── Concurrent dual-provider ───────────────────────────────────
+            gemini_svc = GeminiFindPoeService()
+            openai_svc = OpenAIFindPoeService()
+
+            gemini_task = asyncio.to_thread(gemini_svc.find, request)
+            openai_task = asyncio.to_thread(openai_svc.find, request)
+
+            raw_results = await asyncio.gather(
+                gemini_task, openai_task, return_exceptions=True
+            )
+
+            gemini_res: FindPoeResult | None = None
+            gemini_err: str | None = None
+            openai_res: FindPoeResult | None = None
+            openai_err: str | None = None
+
+            if isinstance(raw_results[0], Exception):
+                gemini_err = str(raw_results[0])
+                logger.error(
+                    f"[find-poe] Task {task_id}: Gemini failed – {gemini_err}"
+                )
+            else:
+                gemini_res = raw_results[0]
+
+            if isinstance(raw_results[1], Exception):
+                openai_err = str(raw_results[1])
+                logger.error(
+                    f"[find-poe] Task {task_id}: OpenAI failed – {openai_err}"
+                )
+            else:
+                openai_res = raw_results[1]
+
+            if not gemini_res and not openai_res:
+                raise RuntimeError(
+                    "Both Gemini and OpenAI FindPOE pipelines failed. "
+                    f"Gemini: {gemini_err}. OpenAI: {openai_err}."
+                )
+
+            # Pick the provider whose top candidate had the highest score.
+            # A provider with no candidates scores 0.0 for comparison purposes.
+            def _top_score(r: FindPoeResult | None) -> float:
+                return r.best_match.confidence_score if r and r.best_match else 0.0
+
+            best_result = (
+                gemini_res if _top_score(gemini_res) >= _top_score(openai_res)
+                else openai_res
+            )
+
+            # Aggregate token usage from both providers
+            from app.models import ProviderTokenUsage, TokenUsage
+            openai_prov_usage: ProviderTokenUsage | None = (
+                openai_res.token_usage.openai
+                if openai_res and openai_res.token_usage and openai_res.token_usage.openai
+                else None
+            )
+            gemini_prov_usage: ProviderTokenUsage | None = (
+                gemini_res.token_usage.gemini
+                if gemini_res and gemini_res.token_usage and gemini_res.token_usage.gemini
+                else None
+            )
+            grand_total = (
+                (openai_prov_usage or ProviderTokenUsage())
+                + (gemini_prov_usage or ProviderTokenUsage())
+            )
+
+            combined = CombinedFindPoeResult(
+                full_name=request.full_name,
+                job_title=request.job_title,
+                best_result=best_result,
+                gemini=FindPoeProviderResult(
+                    provider="gemini",
+                    result=gemini_res,
+                    error=gemini_err,
+                ),
+                openai=FindPoeProviderResult(
+                    provider="openai",
+                    result=openai_res,
+                    error=openai_err,
+                ),
+                token_usage=TokenUsage(
+                    openai=openai_prov_usage,
+                    gemini=gemini_prov_usage,
+                    grand_total=grand_total,
+                ),
+            )
+
+            winning_provider = (
+                "gemini" if best_result is gemini_res else "openai"
+            )
+            best_candidate = best_result.best_match if best_result else None
+            status = "SUCCESS"
+            message = (
+                f"Combined employer discovery complete – "
+                f"best={best_candidate.company_name!r} "
+                f"(score={best_candidate.confidence_score}, provider={winning_provider})"
+                if best_candidate else
+                "Combined employer discovery complete – no candidates found"
+            )
+            result_data = combined.model_dump()
+
+        logger.info(f"[find-poe] Task {task_id}: completed successfully ({provider})")
+
+    except Exception as exc:
+        message = f"FindPOE error: {exc}"
+        logger.error(f"[find-poe] Task {task_id}: failed – {exc}")
+
+    # Persist outcome to the shared TaskRecord table
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task = session.get(TaskRecord, task_id)
+        if task:
+            task.status = status
+            task.message = message
+            task.result_data = result_data
+            task.updated_at = datetime.now(timezone.utc)
+            session.add(task)
+            session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
+
+
+@router.post("/find-poe/", summary="Find the likely employer of a person")
+async def create_find_poe_task(
+    request: FindPoeRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    _rl: None = Depends(task_rate_limit),
+):
+    """
+    Enqueue an asynchronous employer-discovery job for the given person.
+
+    The LLM performs live web research across LinkedIn, company directories,
+    press releases, and news articles to identify the person's current
+    employer(s), then scores each candidate (0–10) against a calibrated rubric.
+
+    Returns a *task_id* that can be polled via **GET /find-poe/{task_id}**.
+
+    **Required fields:** `full_name`
+    **Optional fields:** `job_title`, `city`, `state`, `zip_code`, `country`
+    (all improve disambiguation — especially important for common names)
+
+    **Provider options** (`provider` field):
+    - `gemini` *(default)* — Gemini with live Google Search grounding.
+    - `openai` — OpenAI Responses API with web_search tool.
+    - `both` — Runs both concurrently. Returns each provider's result plus a
+      `best_result` from the provider whose top candidate scored highest.
+
+    When `provider=both`, both `GEMINI_API_KEY` and `OPENAI_API_KEY` must be set.
+    """
+    # ── Fail fast if required API key(s) are missing ─────────────────────────
+    if request.provider in ("gemini", "both") and not settings.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GEMINI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+    if request.provider in ("openai", "both") and not settings.OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "OPENAI_API_KEY is not configured. "
+                "Set it in your .env file and restart the server."
+            ),
+        )
+
+    task_id = str(uuid.uuid4())
+    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    session.add(task_record)
+    session.commit()
+
+    background_tasks.add_task(_process_find_poe_task, task_id, request)
+
+    return {"task_id": task_id, "status": "IN_PROGRESS", "provider": request.provider}
+
+
+@router.get("/find-poe/failed/", summary="List failed FindPOE tasks")
+async def get_failed_find_poe_tasks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Return the most recently failed employer-discovery tasks (most recent first).
+    """
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(
+            TaskRecord.message.contains("FindPOE")  # type: ignore[union-attr]
+            | (TaskRecord.message == "Unknown error")  # type: ignore[union-attr]
+        )
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
+    tasks = session.exec(statement).all()
+
+    results = []
+    for t in tasks:
+        full_name = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            full_name = t.result_data.get("full_name", "Unknown")
+
+        results.append({
+            "task_id": t.task_id,
+            "full_name": full_name,
+            "message": t.message,
+            "failed_at": t.updated_at,
+        })
+
+    return {"failed_tasks": results}
+
+
+@router.get("/find-poe/{task_id}", summary="Get FindPOE task status")
+async def get_find_poe_task_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    """
+    Poll the status and result of an employer-discovery task by *task_id*.
+
+    Once `status` is `SUCCESS`, the `result` object contains:
+    - `best_match` — the highest-confidence employer candidate
+    - `candidates` — all candidates ranked by confidence score descending
+    - Each candidate has: `company_name`, `confidence_score` (0–10),
+      `evidence_summary`, and `sources_found`
+
+    When `provider=both`, `result` is a `CombinedFindPoeResult` with
+    `best_result`, `gemini`, and `openai` sub-objects.
+    """
+    task = session.get(TaskRecord, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": task.message,
+        "result": task.result_data,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
