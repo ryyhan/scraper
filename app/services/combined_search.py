@@ -6,6 +6,7 @@ Executes both OpenAI and Gemini search pipelines concurrently and aggregates the
 
 import asyncio
 import re
+from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
 from loguru import logger
 from typing import Optional
 
@@ -26,6 +27,138 @@ from app.models import (
 )
 from app.services.openai_search import OpenAISearchService
 from app.services.gemini_search import GeminiSearchService
+
+
+# ---------------------------------------------------------------------------
+# URL sanitisation helpers
+# ---------------------------------------------------------------------------
+
+# Query-parameter keys whose presence indicates a tracking or attribution
+# parameter that should be stripped before the URL is returned to the caller.
+# All comparisons are done case-insensitively.
+_TRACKING_PARAMS: frozenset[str] = frozenset({
+    # UTM family (Google Analytics)
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_source_platform", "utm_creative_format", "utm_marketing_tactic",
+    # Common referral / attribution params
+    "ref", "source", "referrer", "via", "origin",
+    # OpenAI / Bing tracking
+    "msclkid", "gclid", "fbclid", "ttclid",
+})
+
+# Hostnames (or hostname suffixes) that are never the company's own official
+# website.  Any URL whose parsed hostname ends with one of these strings is
+# treated as a third-party or provider-internal URL and discarded outright.
+# Keys are matched as exact hostname suffixes (e.g. ".bbb.org" catches
+# "www.bbb.org", "bbb.org", and any subdomain).
+_REJECTED_HOSTS: tuple[str, ...] = (
+    # Vertex AI / Gemini grounding redirect infrastructure
+    "vertexaisearch.cloud.google.com",
+    # BBB — directory listing, not the company's own site
+    "bbb.org",
+    # Common third-party business directories / social platforms
+    "yelp.com",
+    "linkedin.com",
+    "glassdoor.com",
+    "indeed.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "wikipedia.org",
+    "yellowpages.com",
+    "manta.com",
+    "zoominfo.com",
+    "dnb.com",
+    "hoovers.com",
+    "corporationwiki.com",
+    "bizapedia.com",
+    "opencorporates.com",
+    "sec.gov",
+)
+
+
+def _sanitize_official_site(raw_url: str) -> str:
+    """
+    Return a clean, canonical official-site URL, or ``""`` if the input is
+    unusable.
+
+    Two classes of problems are addressed:
+
+    1. **Tracking query parameters** — Parameters such as ``utm_source=openai``
+       are stripped from the URL's query string.  The rest of the URL
+       (scheme, host, path, fragment) is preserved unchanged.  If removing
+       tracking params leaves the query string empty, the ``?`` separator is
+       also removed.
+
+    2. **Third-party / non-official hostnames** — URLs pointing to known
+       business-directory, social-media, or provider-internal infrastructure
+       hosts (e.g. ``bbb.org``, ``vertexaisearch.cloud.google.com``,
+       ``linkedin.com``) are discarded entirely (returns ``""``).
+       These URLs originate from the LLM's grounding sources and represent
+       *where the data was found*, not the company's own web presence.
+
+    Args:
+        raw_url: The URL string produced by the LLM pipeline, possibly
+                 containing tracking params or pointing to a non-official host.
+
+    Returns:
+        A sanitised URL string, or ``""`` if the URL should be suppressed.
+    """
+    if not raw_url or not raw_url.strip():
+        return ""
+
+    url = raw_url.strip()
+
+    # Must have a valid http(s) scheme — bare hostnames, relative paths, and
+    # provider-specific protocol strings (e.g. "grounding://...") are rejected.
+    if not url.startswith(("http://", "https://")):
+        logger.debug(
+            f"[_sanitize_official_site] Rejected (no http(s) scheme): {url!r}"
+        )
+        return ""
+
+    try:
+        parsed = urlparse(url)
+    except Exception:  # pragma: no cover — malformed URL edge case
+        logger.debug(
+            f"[_sanitize_official_site] Rejected (URL parse error): {url!r}"
+        )
+        return ""
+
+    hostname: str = parsed.netloc.lower()
+    # Strip port suffix if present (e.g. "example.com:8080" → "example.com")
+    hostname = hostname.split(":")[0]
+
+    # ── 1. Reject known third-party / infrastructure hosts ─────────────────
+    for rejected in _REJECTED_HOSTS:
+        # Match on exact hostname or any subdomain of a rejected host.
+        if hostname == rejected or hostname.endswith("." + rejected):
+            logger.debug(
+                f"[_sanitize_official_site] Rejected (non-official host {rejected!r}): "
+                f"{url!r}"
+            )
+            return ""
+
+    # ── 2. Strip tracking query parameters ─────────────────────────────────
+    if parsed.query:
+        clean_params = [
+            (k, v)
+            for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_PARAMS
+        ]
+        clean_query = urlencode(clean_params) if clean_params else ""
+        parsed = parsed._replace(query=clean_query)
+        cleaned_url = urlunparse(parsed)
+        if cleaned_url != url:
+            logger.debug(
+                f"[_sanitize_official_site] Stripped tracking params: "
+                f"{url!r} → {cleaned_url!r}"
+            )
+        return cleaned_url
+
+    return url
 
 
 class CombinedSearchService:
@@ -92,7 +225,7 @@ class CombinedSearchService:
         # Process OpenAI Result
         if openai_result:
             if openai_result.official_site:
-                official_site = openai_result.official_site
+                official_site = _sanitize_official_site(openai_result.official_site)
 
             openai_stats.total_phones = len([p for p in openai_result.company_info.phones if p])
             openai_stats.total_faxes = len([f for f in openai_result.company_info.faxes if f])
@@ -119,7 +252,7 @@ class CombinedSearchService:
         # Process Gemini Result
         if gemini_result:
             if not official_site and gemini_result.official_site:
-                official_site = gemini_result.official_site
+                official_site = _sanitize_official_site(gemini_result.official_site)
 
             gemini_stats.total_phones = len([p for p in gemini_result.company_info.phones if p])
             gemini_stats.total_faxes = len([f for f in gemini_result.company_info.faxes if f])
