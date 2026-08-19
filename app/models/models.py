@@ -66,6 +66,8 @@ class ContactTag(str, Enum):
     ADMIN = "Admin"
     MANAGEMENT = "Management"
     OPERATIONS = "Operations"
+    CORPORATE = "Corporate"
+    HEADQUARTERS = "Headquarters"
     FINANCE = "Finance"
     ACCOUNTING = "Accounting"
     LEGAL = "Legal"
