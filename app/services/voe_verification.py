@@ -47,8 +47,9 @@ from google.genai import types as genai_types
 from loguru import logger
 
 from app.core.config import settings
-from app.models import VoeRequest, VoeVerificationResult
+from app.models import VoeRequest, VoeVerificationResult, TokenUsage, ProviderTokenUsage
 from app.services._retry import retry_gemini
+from app.services._token_utils import gemini_usage
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -139,8 +140,8 @@ class VoeVerificationService:
             f"{request.full_name!r} @ {request.company!r}"
         )
 
-        # ── Step 1: Web Research (The "Investigator") ─────────────────────
-        raw_evidence = self._investigate(client, subject_context, request)
+        # ── Step 1: Web Research (The "Investigator") ──────────────────────
+        raw_evidence, investigate_usage = self._investigate(client, subject_context, request)
 
         # Guard: if grounding returned nothing (safety filter, blocked content,
         # or a transient API issue), skip Step 2 to avoid a wasted LLM call.
@@ -152,7 +153,7 @@ class VoeVerificationService:
                 f"{request.full_name!r} @ {request.company!r} — "
                 "likely a safety filter or blocked content. Returning UNVERIFIED."
             )
-            return VoeVerificationResult(
+            result = VoeVerificationResult(
                 full_name=request.full_name,
                 company=request.company,
                 job_title=request.job_title,
@@ -165,13 +166,30 @@ class VoeVerificationService:
                 ),
                 sources_found=[],
             )
+            result.token_usage = TokenUsage(
+                openai=None,
+                gemini=investigate_usage,
+                grand_total=investigate_usage,
+            )
+            return result
 
         # ── Step 2: Structured Scoring (The "Analyst") ────────────────────
-        result = self._analyse(client, raw_evidence, request)
+        result, analyse_usage = self._analyse(client, raw_evidence, request)
+
+        # ── Attach aggregated token usage ─────────────────────────────────
+        total_gemini_usage = investigate_usage + analyse_usage
+        result.token_usage = TokenUsage(
+            openai=None,
+            gemini=total_gemini_usage,
+            grand_total=total_gemini_usage,
+        )
 
         logger.info(
             f"[VoeVerificationService] Verification complete for {request.full_name!r}: "
-            f"score={result.confidence_score} verdict={result.verdict!r}"
+            f"score={result.confidence_score} verdict={result.verdict!r} | "
+            f"tokens: input={total_gemini_usage.input_tokens}, "
+            f"output={total_gemini_usage.output_tokens}, "
+            f"total={total_gemini_usage.total_tokens}"
         )
         return result
 
@@ -198,6 +216,8 @@ class VoeVerificationService:
         ]
         if request.city:
             parts.append(f"City: {request.city}")
+        if request.state:
+            parts.append(f"State: {request.state}")
         if request.zip_code:
             parts.append(f"Zip Code: {request.zip_code}")
         if request.country:
@@ -209,13 +229,15 @@ class VoeVerificationService:
         client: genai.Client,
         subject_context: str,
         request: VoeRequest,
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Step 1 — Grounded web research.
 
         Issues a live Google Search via Gemini to collect evidence about
         whether *request.full_name* holds *request.job_title* at
         *request.company*.  Returns a rich, cited research summary.
+
+        Returns a tuple of (research_text, token_usage_for_this_step).
         """
         prompt = (
             f"Employment verification research task:\n"
@@ -259,23 +281,27 @@ class VoeVerificationService:
 
         response = _call()
         raw_text: str = response.text or ""
+        step_usage = gemini_usage(response.usage_metadata)
         logger.debug(
-            f"[VoeVerificationService] Step 1: received {len(raw_text)} chars of evidence"
+            f"[VoeVerificationService] Step 1: received {len(raw_text)} chars of evidence "
+            f"(tokens={step_usage.total_tokens})"
         )
-        return raw_text
+        return raw_text, step_usage
 
     def _analyse(
         self,
         client: genai.Client,
         raw_evidence: str,
         request: VoeRequest,
-    ) -> VoeVerificationResult:
+    ) -> tuple[VoeVerificationResult, ProviderTokenUsage]:
         """
         Step 2 — Structured scoring.
 
         Passes the raw evidence to Gemini with a strict JSON schema and a
         calibrated scoring rubric.  Returns a validated
         :class:`VoeVerificationResult` instance.
+
+        Returns a tuple of (result, token_usage_for_this_step).
         """
         prompt = (
             f"Employment verification analysis task:\n\n"
@@ -322,11 +348,12 @@ class VoeVerificationService:
             )
 
         response = _call()
+        step_usage = gemini_usage(response.usage_metadata)
 
         # Prefer SDK-parsed Pydantic object (zero boilerplate)
         if response.parsed is not None:
             logger.debug("[VoeVerificationService] Step 2: using SDK-parsed Pydantic object")
-            return response.parsed  # type: ignore[return-value]
+            return response.parsed, step_usage  # type: ignore[return-value]
 
         # Fallback: manual JSON parse (handles edge-case model versions)
         logger.warning(
@@ -335,7 +362,7 @@ class VoeVerificationService:
         )
         raw_json = self._strip_markdown_fences(response.text or "{}")
         data = json.loads(raw_json)
-        return VoeVerificationResult.model_validate(data)
+        return VoeVerificationResult.model_validate(data), step_usage
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:

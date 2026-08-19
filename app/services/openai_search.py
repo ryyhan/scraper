@@ -41,8 +41,9 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.models import ContactTag, HintAddress
+from app.models import ContactTag, HintAddress, TokenUsage, ProviderTokenUsage
 from app.services._retry import retry_openai
+from app.services._token_utils import openai_usage
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -137,7 +138,7 @@ class OpenAISearchService:
         hint_block = self._build_hint_block(company_name, country, zip_code, phone, fax, address)
 
         # ── Step 1: Multi-Turn Deep Research (The "Gatherer") ─────────────────
-        raw_research = self._gather(target_context, company_name, url, hint_block)
+        raw_research, gather_usage = self._gather(target_context, company_name, url, hint_block)
         logger.debug(
             f"[OpenAISearchService] Total multi-turn research length: {len(raw_research)} chars"
         )
@@ -185,7 +186,19 @@ class OpenAISearchService:
             f"3. The response MUST be a VALID JSON object matching exactly this schema:\n{json.dumps(model_class.model_json_schema(), indent=2)}\n"
             f"4. IMPORTANT: DO NOT return the schema definition itself. Return the ACTUAL extracted data values.\n"
             f"5. Make sure to fill in the 'company_name' key with the target company: {company_name}.\n"
-            "6. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "6. Fill 'official_company_name' with the company's LEGAL/OFFICIAL registered name "
+            "as it appears on the official website, government records, SEC filings, or BBB listing "
+            f"(e.g. 'Troopr Inc.' not 'Troopr', or 'DEMOULAS MARKET BASKET INC.' not 'Market Basket'). "
+            f"If you cannot determine the legal name with confidence, copy the value of 'company_name' ({company_name}).\n"
+            "7. Fill 'official_site' with the company's PRIMARY OFFICIAL website URL — "
+            "the domain the company itself owns and operates (e.g. 'https://acme.com'). "
+            "STRICT EXCLUSIONS — never use any of the following as official_site:\n"
+            "   - Third-party directory or listing pages: BBB (bbb.org), Yelp, LinkedIn, "
+            "Glassdoor, Indeed, ZoomInfo, Manta, YellowPages, Wikipedia, or any similar site.\n"
+            "   - Any URL with tracking query parameters (e.g. utm_source=openai) — return "
+            "only the clean base URL without such parameters.\n"
+            "If no company-owned official URL was found in the research, leave this as an empty string.\n"
+            "8. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -205,6 +218,7 @@ class OpenAISearchService:
             )
 
         final_response = _extract_call()
+        extract_usage = openai_usage(final_response.usage)
 
         # ── Parse + clean + validate ───────────────────────────────────────────
         data = json.loads(final_response.output_text)
@@ -212,7 +226,7 @@ class OpenAISearchService:
         result = model_class.model_validate(cleaned_data)
 
         # ── Step 3: Verification (The "Verifier") ─────────────────────────────
-        result = self._verify(raw_research, result, company_name, model_class, entity_scope_note)
+        result, verify_usage = self._verify(raw_research, result, company_name, model_class, entity_scope_note)
 
         if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
             result.company_info.phones = result.company_info.phones[:max_limit]
@@ -220,7 +234,24 @@ class OpenAISearchService:
             result.company_info.emails = result.company_info.emails[:max_limit]
             result.company_info.addresses = result.company_info.addresses[:max_limit]
 
-        logger.info(f"[OpenAISearchService] Extraction complete for: {company_name!r}")
+        # Guarantee official_company_name is always populated — fall back to the
+        # queried name if the LLM left it empty or the model class doesn't have the field.
+        if hasattr(result, "official_company_name") and not result.official_company_name:
+            result.official_company_name = company_name
+
+        # ── Attach aggregated token usage ──────────────────────────────────────
+        total_openai_usage = gather_usage + extract_usage + verify_usage
+        result.token_usage = TokenUsage(
+            openai=total_openai_usage,
+            gemini=None,
+            grand_total=total_openai_usage,
+        )
+        logger.info(
+            f"[OpenAISearchService] Extraction complete for: {company_name!r} | "
+            f"tokens: input={total_openai_usage.input_tokens}, "
+            f"output={total_openai_usage.output_tokens}, "
+            f"total={total_openai_usage.total_tokens}"
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -362,7 +393,7 @@ class OpenAISearchService:
         company_name: str,
         url: str | None = None,
         hint_block: str = "",
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Multi-turn deep research using the OpenAI Responses API with chained
         context (``previous_response_id``).
@@ -379,6 +410,9 @@ class OpenAISearchService:
         When *url* is provided the model is instructed to crawl specific
         subpages of the official site as its mandatory first action (this is
         done via the LLM's built-in web_search tool — no Python HTTP calls).
+
+        Returns a tuple of (combined_research_text, accumulated_token_usage)
+        so the caller can aggregate usage across all pipeline steps.
         """
         client = self._require_client()
 
@@ -515,12 +549,20 @@ class OpenAISearchService:
 
         r3 = _t3()
 
-        logger.debug(
-            f"[OpenAISearchService] Multi-turn complete for {company_name!r}: "
-            f"T1={len(r1.output_text)}c, T2={len(r2.output_text)}c, T3={len(r3.output_text)}c"
+        # Accumulate token usage across all three turns.
+        accumulated_usage = (
+            openai_usage(r1.usage)
+            + openai_usage(r2.usage)
+            + openai_usage(r3.usage)
         )
 
-        return (
+        logger.debug(
+            f"[OpenAISearchService] Multi-turn complete for {company_name!r}: "
+            f"T1={len(r1.output_text)}c, T2={len(r2.output_text)}c, T3={len(r3.output_text)}c | "
+            f"gather_tokens={accumulated_usage.total_tokens}"
+        )
+
+        combined_text = (
             "=== RESEARCH TURN 1 (HR / General / Directories) ===\n"
             + r1.output_text
             + "\n\n=== RESEARCH TURN 2 (PDFs / BBB / Schema Markup) ===\n"
@@ -528,6 +570,7 @@ class OpenAISearchService:
             + "\n\n=== RESEARCH TURN 3 (LinkedIn / Social / Press Releases) ===\n"
             + r3.output_text
         )
+        return combined_text, accumulated_usage
 
     def _verify(
         self,
@@ -536,7 +579,7 @@ class OpenAISearchService:
         company_name: str,
         model_class: Type[T],
         entity_filter_note: str = "",
-    ) -> T:
+    ) -> tuple[T, ProviderTokenUsage]:
         """
         Step 3 — Verify extracted contacts against the raw research text.
 
@@ -547,6 +590,8 @@ class OpenAISearchService:
         be incorrectly removed.
         Contacts that cannot be found (even after normalisation) are removed,
         preventing pattern-completion and domain-guessing hallucinations.
+
+        Returns a tuple of (verified_result, token_usage_for_this_step).
         """
         extracted_json = extracted.model_dump_json(indent=2)
 
@@ -597,7 +642,7 @@ class OpenAISearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', and 'official_site' unchanged.\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' unchanged.\n"
             "- IMPORTANT: Return ONLY the filtered data values in the EXACT SAME JSON structure "
             "as EXTRACTED CONTACTS below. Do NOT return a schema or type definition.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
@@ -618,6 +663,7 @@ class OpenAISearchService:
             )
 
         verify_response = _verify_call()
+        step_usage = openai_usage(verify_response.usage)
 
         data = json.loads(verify_response.output_text)
         cleaned_data = self._clean_dict(data)
@@ -626,7 +672,7 @@ class OpenAISearchService:
             logger.debug(
                 f"[OpenAISearchService] Step 3: verification complete for {company_name!r}"
             )
-            return verified
+            return verified, step_usage
         except Exception as exc:
             # If the LLM returned a schema definition or garbage, fall back to the
             # pre-verification result rather than crashing the whole pipeline.
@@ -634,7 +680,7 @@ class OpenAISearchService:
                 f"[OpenAISearchService] Step 3: verification parse failed ({exc}); "
                 f"returning pre-verification result for {company_name!r}"
             )
-            return extracted
+            return extracted, step_usage
 
     @staticmethod
     def _clean_val(value: object) -> object:

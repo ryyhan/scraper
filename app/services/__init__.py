@@ -8,3 +8,5 @@ from .openai_voe import OpenAIVoeService
 from .combined_search import CombinedSearchService
 from .pdf_extractor import PdfExtractorService
 from .bg_check_parser import BgCheckParserService
+from .gemini_find_poe import GeminiFindPoeService
+from .openai_find_poe import OpenAIFindPoeService

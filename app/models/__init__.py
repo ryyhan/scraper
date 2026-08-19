@@ -14,6 +14,11 @@ from .models import (
     VoeVerificationResult,
     VoeProviderResult,
     CombinedVoeResult,
+    FindPoeRequest,
+    CompanyCandidate,
+    FindPoeResult,
+    FindPoeProviderResult,
+    CombinedFindPoeResult,
     CombinedSearchRequest,
     CombinedCompanyInfo,
     CombinedSearchResult,
@@ -26,4 +31,6 @@ from .models import (
     PdfExtractionResult,
     BgCheckFields,
     BgCheckParseResult,
+    ProviderTokenUsage,
+    TokenUsage,
 )

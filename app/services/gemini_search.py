@@ -59,8 +59,9 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.models import ContactTag, HintAddress
+from app.models import ContactTag, HintAddress, TokenUsage, ProviderTokenUsage
 from app.services._retry import retry_gemini
+from app.services._token_utils import gemini_usage
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -176,8 +177,8 @@ class GeminiSearchService:
         target_context = self._build_context(company_name, country, zip_code, url)
         hint_block = self._build_hint_block(company_name, country, zip_code, phone, fax, address)
 
-        # ── Step 1: Parallel Deep Research (The "Gatherer") ───────────────────
-        research_text = self._gather(target_context, company_name, url, hint_block)
+        # ── Step 1: Parallel Deep Research (The "Gatherer") ────────────────────
+        research_text, gather_usage = self._gather(target_context, company_name, url, hint_block)
 
         # Build entity scope note from ALL populated anchors for Steps 2 and 3.
         _clean_phone = phone if (phone and any(c.isdigit() for c in phone)) else None
@@ -203,11 +204,11 @@ class GeminiSearchService:
                 f"When the entity is ambiguous, default to KEEP.\n"
             )
 
-        # ── Step 2: Extraction (The "Extractor") ───────────────────────────
-        result: T = self._extract(research_text, company_name, model_class, entity_scope_note)
+        # ── Step 2: Extraction (The "Extractor") ────────────────────────────
+        result, extract_usage = self._extract(research_text, company_name, model_class, entity_scope_note)
 
-        # ── Step 3: Verification (The "Verifier") ─────────────────────────────
-        result = self._verify(research_text, result, company_name, model_class, entity_scope_note)
+        # ── Step 3: Verification (The "Verifier") ───────────────────────────
+        result, verify_usage = self._verify(research_text, result, company_name, model_class, entity_scope_note)
 
         if max_limit is not None and max_limit > 0 and hasattr(result, "company_info"):
             result.company_info.phones = result.company_info.phones[:max_limit]
@@ -215,7 +216,19 @@ class GeminiSearchService:
             result.company_info.emails = result.company_info.emails[:max_limit]
             result.company_info.addresses = result.company_info.addresses[:max_limit]
 
-        logger.info(f"[GeminiSearchService] Extraction complete for: {company_name!r}")
+        # ── Attach aggregated token usage ──────────────────────────────────────
+        total_gemini_usage = gather_usage + extract_usage + verify_usage
+        result.token_usage = TokenUsage(
+            openai=None,
+            gemini=total_gemini_usage,
+            grand_total=total_gemini_usage,
+        )
+        logger.info(
+            f"[GeminiSearchService] Extraction complete for: {company_name!r} | "
+            f"tokens: input={total_gemini_usage.input_tokens}, "
+            f"output={total_gemini_usage.output_tokens}, "
+            f"total={total_gemini_usage.total_tokens}"
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -334,7 +347,7 @@ class GeminiSearchService:
         company_name: str,
         url: str | None = None,
         hint_block: str = "",
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Launch three parallel grounded sub-gatherers via ``ThreadPoolExecutor``
         and merge their results into a single combined research text.
@@ -342,6 +355,9 @@ class GeminiSearchService:
         Sub-gatherers run concurrently so total latency ≈ slowest sub-gatherer,
         not the sum of all three.  Each failure is caught individually and logged
         as a warning; the merged output from surviving sub-gatherers is returned.
+
+        Returns a tuple of (combined_research_text, accumulated_token_usage)
+        so the caller can aggregate usage across all pipeline steps.
         """
         logger.debug(
             f"[GeminiSearchService] Launching 3 parallel sub-gatherers for {company_name!r}"
@@ -360,17 +376,20 @@ class GeminiSearchService:
             }
 
             sections: list[str] = []
+            accumulated_usage = ProviderTokenUsage()
             for future, label in futures.items():
                 try:
-                    text = future.result(timeout=180)
+                    text, sub_usage = future.result(timeout=180)
                     if text:
                         sections.append(
                             f"=== GEMINI SUB-SEARCH: {label} ===\n{text}"
                         )
                         logger.debug(
                             f"[GeminiSearchService] Sub-gatherer '{label}' "
-                            f"returned {len(text)} chars for {company_name!r}"
+                            f"returned {len(text)} chars for {company_name!r} "
+                            f"(tokens={sub_usage.total_tokens})"
                         )
+                    accumulated_usage = accumulated_usage + sub_usage
                 except Exception as exc:
                     logger.warning(
                         f"[GeminiSearchService] Sub-gatherer '{label}' failed "
@@ -380,11 +399,12 @@ class GeminiSearchService:
         combined = "\n\n".join(sections)
         logger.debug(
             f"[GeminiSearchService] Parallel gather complete for {company_name!r}: "
-            f"{len(combined)} total chars from {len(sections)}/3 sub-gatherers"
+            f"{len(combined)} total chars from {len(sections)}/3 sub-gatherers | "
+            f"gather_tokens={accumulated_usage.total_tokens}"
         )
-        return combined
+        return combined, accumulated_usage
 
-    def _run_grounded_search(self, prompt: str, label: str, company_name: str) -> str:
+    def _run_grounded_search(self, prompt: str, label: str, company_name: str) -> tuple[str, ProviderTokenUsage]:
         """
         Execute a single grounded Gemini search call with retry protection.
 
@@ -400,6 +420,9 @@ class GeminiSearchService:
         Transient errors (429 quota, 503 service unavailable, 500 server error,
         deadline exceeded) are automatically retried with exponential backoff
         via the shared ``retry_gemini()`` decorator from ``_retry.py``.
+
+        Returns a tuple of (response_text, token_usage) so the caller can
+        accumulate usage across multiple sub-gatherer calls.
         """
         grounding_tool = genai_types.Tool(
             google_search=genai_types.GoogleSearch()
@@ -418,6 +441,7 @@ class GeminiSearchService:
 
         response = _call()
         raw_text: str = response.text or ""
+        step_usage = gemini_usage(response.usage_metadata)
 
         # Harvest grounding chunk metadata — source URLs + titles that Gemini
         # actually visited.  Appending these gives the Extractor more surface
@@ -435,7 +459,7 @@ class GeminiSearchService:
             source_block = "\n".join(grounding_sources)
             raw_text += f"\n\nSOURCES VISITED BY GEMINI [{label}]:\n{source_block}"
 
-        return raw_text
+        return raw_text, step_usage
 
     def _gather_hr_general(
         self,
@@ -443,7 +467,7 @@ class GeminiSearchService:
         company_name: str,
         url: str | None,
         hint_block: str = "",
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Sub-gatherer 1 — Broad HR / General / Admin / Business Directories.
 
@@ -525,7 +549,7 @@ class GeminiSearchService:
         self,
         target_context: str,
         company_name: str,
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Sub-gatherer 2 — Business Directories, PDF Documents, Schema Markup.
 
@@ -565,7 +589,7 @@ class GeminiSearchService:
         self,
         target_context: str,
         company_name: str,
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Sub-gatherer 3 — LinkedIn, Social Media, Press Releases, Contact Databases.
 
@@ -607,13 +631,15 @@ class GeminiSearchService:
         company_name: str,
         model_class: Type[T],
         entity_anchor_note: str = "",
-    ) -> T:
+    ) -> tuple[T, ProviderTokenUsage]:
         """
         Step 2 — Distil the raw research into a structured Pydantic model.
 
         When *entity_anchor_note* is non-empty (i.e. caller supplied phone/
         address hints) it is prepended to the extraction prompt so the LLM
         only extracts contacts from the anchor-matched entity.
+
+        Returns a tuple of (extracted_result, token_usage_for_this_step).
         """
         extraction_prompt = (
             f"Based on the following research about '{company_name}':\n\n"
@@ -629,11 +655,24 @@ class GeminiSearchService:
             "   - Use 'context' to optionally provide the webpage section or text where it was found (e.g., 'Found on Careers page').\n"
             "2. For addresses, populate the structured fields (address1, address2, city, state, zip, country, countryCode).\n"
             f"3. Fill the 'company_name' key with the exact target name: {company_name}.\n"
-            "4. Fill 'official_site' with the primary official website URL if found, "
-            "otherwise leave it as an empty string.\n"
-            "5. Return ONLY the extracted data values — do NOT return the schema itself.\n"
-            "6. If a field has no data, use an empty array [] or empty string \"\".\n"
-            "7. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "4. Fill 'official_company_name' with the company's LEGAL/OFFICIAL registered name "
+            "as it appears on the official website, government records, SEC filings, or BBB listing "
+            f"(e.g. 'Troopr Inc.' not 'Troopr', or 'DEMOULAS MARKET BASKET INC.' not 'Market Basket'). "
+            f"If you cannot determine the legal name with confidence, copy the value of 'company_name' ({company_name}).\n"
+            "5. Fill 'official_site' with the company's PRIMARY OFFICIAL website URL — "
+            "the domain the company itself owns and operates (e.g. 'https://acme.com'). "
+            "STRICT EXCLUSIONS — never use any of the following as official_site:\n"
+            "   - Third-party directory or listing pages: BBB (bbb.org), Yelp, LinkedIn, "
+            "Glassdoor, Indeed, ZoomInfo, Manta, YellowPages, Wikipedia, or any similar site.\n"
+            "   - Provider-internal redirect URLs such as those containing "
+            "'vertexaisearch.cloud.google.com' — these are grounding infrastructure URLs, "
+            "not the company's website.\n"
+            "   - Any URL with tracking query parameters (e.g. utm_source=openai) — return "
+            "only the clean base URL without such parameters.\n"
+            "If no company-owned official URL was found in the research, leave this as an empty string.\n"
+            "6. Return ONLY the extracted data values — do NOT return the schema itself.\n"
+            "7. If a field has no data, use an empty array [] or empty string \"\".\n"
+            "8. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -663,12 +702,17 @@ class GeminiSearchService:
             )
 
         response = _call()
+        step_usage = gemini_usage(response.usage_metadata)
 
         # `response.parsed` is automatically populated by the SDK when
         # `response_schema` is a Pydantic model class.
         if response.parsed is not None:
             logger.debug("[GeminiSearchService] Step 2: using SDK-parsed Pydantic object")
-            return response.parsed  # type: ignore[return-value]
+            parsed = response.parsed
+            # Guarantee official_company_name is always populated on the parsed object.
+            if hasattr(parsed, "official_company_name") and not parsed.official_company_name:
+                parsed.official_company_name = company_name
+            return parsed, step_usage  # type: ignore[return-value]
 
         # Fallback: the SDK may return raw JSON text on some model/version
         # combinations.  Parse manually to guarantee a validated result.
@@ -680,7 +724,13 @@ class GeminiSearchService:
 
         raw_json_text = self._strip_markdown_fences(response.text or "{}")
         data = json.loads(raw_json_text)
-        return model_class.model_validate(data)
+        result = model_class.model_validate(data)
+
+        # Guarantee official_company_name is always populated on the manually-parsed result.
+        if hasattr(result, "official_company_name") and not result.official_company_name:
+            result.official_company_name = company_name
+
+        return result, step_usage
 
     def _verify(
         self,
@@ -689,7 +739,7 @@ class GeminiSearchService:
         company_name: str,
         model_class: Type[T],
         entity_filter_note: str = "",
-    ) -> T:
+    ) -> tuple[T, ProviderTokenUsage]:
         """
         Step 3 — Verify extracted contacts against the raw research text.
 
@@ -700,6 +750,8 @@ class GeminiSearchService:
         incorrectly removed.  Contacts that still cannot be found are removed,
         preventing the LLM from inventing plausible-looking but fictitious
         contact details (e.g. ``hr@company.com`` inferred from the domain).
+
+        Returns a tuple of (verified_result, token_usage_for_this_step).
         """
         import json
 
@@ -751,7 +803,7 @@ class GeminiSearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', and 'official_site' fields unchanged.\n\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' fields unchanged.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
             f"EXTRACTED CONTACTS:\n{extracted_json}\n\n"
             "Return the filtered result in exactly the same JSON schema."
@@ -776,13 +828,14 @@ class GeminiSearchService:
             )
 
         response = _call()
+        step_usage = gemini_usage(response.usage_metadata)
 
         if response.parsed is not None:
             verified = response.parsed  # type: ignore[assignment]
             logger.debug(
                 "[GeminiSearchService] Step 3: verification complete via SDK-parsed object"
             )
-            return verified  # type: ignore[return-value]
+            return verified, step_usage  # type: ignore[return-value]
 
         # Fallback to manual parse if SDK doesn't auto-parse
         logger.warning(
@@ -790,7 +843,7 @@ class GeminiSearchService:
         )
         raw_json_text = self._strip_markdown_fences(response.text or "{}")
         data = json.loads(raw_json_text)
-        return model_class.model_validate(data)
+        return model_class.model_validate(data), step_usage
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:

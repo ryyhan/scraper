@@ -43,8 +43,9 @@ from openai import OpenAI
 from loguru import logger
 
 from app.core.config import settings
-from app.models import VoeRequest, VoeVerificationResult
+from app.models import VoeRequest, VoeVerificationResult, TokenUsage, ProviderTokenUsage
 from app.services._retry import retry_openai
+from app.services._token_utils import openai_usage
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -132,14 +133,25 @@ class OpenAIVoeService:
         )
 
         # ── Step 1: Web Research (The "Investigator") ──────────────────────
-        raw_evidence = self._investigate(client, subject_context, request)
+        raw_evidence, investigate_usage = self._investigate(client, subject_context, request)
 
         # ── Step 2: Structured Scoring (The "Analyst") ─────────────────────
-        result = self._analyse(client, raw_evidence, request)
+        result, analyse_usage = self._analyse(client, raw_evidence, request)
+
+        # ── Attach aggregated token usage ─────────────────────────────────
+        total_openai_usage = investigate_usage + analyse_usage
+        result.token_usage = TokenUsage(
+            openai=total_openai_usage,
+            gemini=None,
+            grand_total=total_openai_usage,
+        )
 
         logger.info(
             f"[OpenAIVoeService] Verification complete for {request.full_name!r}: "
-            f"score={result.confidence_score} verdict={result.verdict!r}"
+            f"score={result.confidence_score} verdict={result.verdict!r} | "
+            f"tokens: input={total_openai_usage.input_tokens}, "
+            f"output={total_openai_usage.output_tokens}, "
+            f"total={total_openai_usage.total_tokens}"
         )
         return result
 
@@ -166,6 +178,8 @@ class OpenAIVoeService:
         ]
         if request.city:
             parts.append(f"City: {request.city}")
+        if request.state:
+            parts.append(f"State: {request.state}")
         if request.zip_code:
             parts.append(f"Zip Code: {request.zip_code}")
         if request.country:
@@ -177,13 +191,15 @@ class OpenAIVoeService:
         client: OpenAI,
         subject_context: str,
         request: VoeRequest,
-    ) -> str:
+    ) -> tuple[str, ProviderTokenUsage]:
         """
         Step 1 — Grounded web research via OpenAI web_search tool.
 
         Issues live web searches to collect evidence about whether
         *request.full_name* holds *request.job_title* at *request.company*.
         Returns a rich, cited research summary.
+
+        Returns a tuple of (research_text, token_usage_for_this_step).
         """
         prompt = (
             f"Employment verification research task:\n"
@@ -222,23 +238,27 @@ class OpenAIVoeService:
 
         response = _call()
         raw_text: str = response.output_text or ""
+        step_usage = openai_usage(response.usage)
         logger.debug(
-            f"[OpenAIVoeService] Step 1: received {len(raw_text)} chars of evidence"
+            f"[OpenAIVoeService] Step 1: received {len(raw_text)} chars of evidence "
+            f"(tokens={step_usage.total_tokens})"
         )
-        return raw_text
+        return raw_text, step_usage
 
     def _analyse(
         self,
         client: OpenAI,
         raw_evidence: str,
         request: VoeRequest,
-    ) -> VoeVerificationResult:
+    ) -> tuple[VoeVerificationResult, ProviderTokenUsage]:
         """
         Step 2 — Structured scoring.
 
         Passes the raw evidence to the model with a strict JSON schema and a
         calibrated scoring rubric. Returns a validated
         :class:`VoeVerificationResult` instance.
+
+        Returns a tuple of (result, token_usage_for_this_step).
         """
         schema = json.dumps(VoeVerificationResult.model_json_schema(), indent=2)
         prompt = (
@@ -281,6 +301,7 @@ class OpenAIVoeService:
             )
 
         response = _call()
+        step_usage = openai_usage(response.usage)
 
         raw_json = self._strip_markdown_fences(response.output_text or "")
 
@@ -304,10 +325,10 @@ class OpenAIVoeService:
                     "Manual verification is recommended."
                 ),
                 sources_found=[],
-            )
+            ), step_usage
 
         data = json.loads(raw_json)
-        return VoeVerificationResult.model_validate(data)
+        return VoeVerificationResult.model_validate(data), step_usage
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:
