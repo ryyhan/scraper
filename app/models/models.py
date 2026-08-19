@@ -662,6 +662,16 @@ class CombinedSearchRequest(BaseModel):
         default=None,
         description="Partial or full known address — used to confirm the correct company entity.",
     )
+    # --- Search type discriminator (reserved for future use) ---
+    type: Literal["rolodex", "voe"] = Field(
+        default="rolodex",
+        description=(
+            "Intended usage pattern for this search. "
+            "'rolodex' (default) — contact-info lookup, current behaviour. "
+            "'voe' — employment-verification workflow (reserved for future use). "
+            "This field is accepted and stored but does not yet alter pipeline behaviour."
+        ),
+    )
 
 
 class CombinedCompanyInfo(BaseModel):
