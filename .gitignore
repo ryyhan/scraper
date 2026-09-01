@@ -1,4 +1,7 @@
-*./__pycache__
-__pycache__
+__pycache__/
+*.py[cod]
 .env
 tasks.db
+tasks.db-shm
+tasks.db-wal
+*.log

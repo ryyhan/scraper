@@ -20,7 +20,7 @@ class ScraperService:
 
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=False)
+        self.browser = await self.playwright.chromium.launch(headless=True)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):

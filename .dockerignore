@@ -1,0 +1,48 @@
+# =============================================================================
+# .dockerignore
+# Keeps the build context lean — everything here is excluded from COPY . .
+# =============================================================================
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+scapEnv/
+venv/
+.venv/
+env/
+
+# Local development tooling
+.git/
+.gitignore
+
+# Local database files (container gets its own at /data/tasks.db via volume)
+tasks.db
+tasks.db-shm
+tasks.db-wal
+
+# Log files (container writes its own)
+scraper.log
+*.log
+
+# Environment files — never bake secrets into the image
+.env
+
+# IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation / planning files (not needed at runtime)
+*.md
+*.csv
+
+# Scratch / one-off scripts
+count_emails.py
+openai_search.py
