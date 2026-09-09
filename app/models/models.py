@@ -806,7 +806,84 @@ class BgCheckParseResult(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Company Matcher Models
+# ---------------------------------------------------------------------------
+
+class CompanyMatchRequest(BaseModel):
+    """Request body for POST /match-companies/."""
+
+    company_a: str = Field(
+        min_length=1,
+        max_length=500,
+        description="First company name string to compare.",
+    )
+    company_b: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Second company name string to compare.",
+    )
+    provider: Literal["groq", "openai", "gemini"] = Field(
+        default="groq",
+        description=(
+            "LLM provider to use for matching. "
+            "'groq' is fastest and cheapest (llama-3.1-8b-instant); "
+            "'openai' and 'gemini' offer higher accuracy for edge cases."
+        ),
+    )
+    deep_search: bool = Field(
+        default=False,
+        description=(
+            "When True, performs a live web search for each company name before "
+            "the verdict call.  Resolves trade names, DBA names, and local businesses "
+            "that the LLM's training data may not recognise "
+            "(e.g. 'Thomas Electrical' → 'THOMAS P. OWENS, LLC'). "
+            "Adds 3–10 s of latency and consumes additional API tokens. "
+            "OpenAI and Gemini use their native search tools; Groq falls back to "
+            "OpenAI web search for the research step."
+        ),
+    )
+    location_hint: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional geographic context to disambiguate local businesses "
+            "(e.g. 'Colorado', 'Denver, CO'). Only used when deep_search=True."
+        ),
+    )
+
+
+class CompanyMatchResult(BaseModel):
+    """Response envelope for POST /match-companies/."""
+
+    company_a: str = Field(description="The first company name as submitted.")
+    company_b: str = Field(description="The second company name as submitted.")
+    is_same_company: bool = Field(
+        description=(
+            "True when both names resolve to the same real-world entity "
+            "(same brand, abbreviation, legal name, or a clear typo/OCR variant)."
+        )
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Model's self-reported confidence in the verdict (0.0 – 1.0).",
+    )
+    reasoning: str = Field(
+        description="One-sentence explanation of the verdict from the LLM."
+    )
+    provider: str = Field(description="LLM provider that produced this result.")
+    deep_search_used: bool = Field(
+        default=False,
+        description="True when a live web-search research step was executed before the verdict.",
+    )
+    processing_time_seconds: float = Field(
+        description="Total wall-clock time including research + verdict (seconds)."
+    )
+
+
 # --- Database Model ---
+
 
 class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)

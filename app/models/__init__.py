@@ -33,4 +33,6 @@ from .models import (
     BgCheckParseResult,
     ProviderTokenUsage,
     TokenUsage,
+    CompanyMatchRequest,
+    CompanyMatchResult,
 )

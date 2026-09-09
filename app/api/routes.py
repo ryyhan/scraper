@@ -15,6 +15,7 @@ from app.models import CombinedSearchRequest, CombinedSearchResult
 from app.models import PdfExtractionResult
 from app.models import BgCheckFields, BgCheckParseResult
 from app.models import FindPoeRequest, FindPoeResult, FindPoeProviderResult, CombinedFindPoeResult
+from app.models import CompanyMatchRequest, CompanyMatchResult
 from app.api.deps import get_session
 from app.api.rate_limit import task_rate_limit
 from app.services import ScraperService, LLMService, WebhookService
@@ -25,6 +26,7 @@ from app.services import CombinedSearchService
 from app.services import PdfExtractorService
 from app.services import BgCheckParserService
 from app.services import GeminiFindPoeService, OpenAIFindPoeService
+from app.services import CompanyMatcherService
 from app.core.config import settings
 
 router = APIRouter()
@@ -1479,3 +1481,51 @@ async def get_find_poe_task_status(
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# Company Name Matcher
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/match-companies/",
+    response_model=CompanyMatchResult,
+    summary="Determine if two company names refer to the same entity",
+    tags=["Utilities"],
+)
+async def match_companies(
+    request: CompanyMatchRequest,
+    _rl: None = Depends(task_rate_limit),
+) -> CompanyMatchResult:
+    """
+    Compare two company name strings and return whether they refer to the same
+    real-world entity.
+
+    **Standard mode** (`deep_search=false`, default)
+
+    Uses the LLM's world knowledge to handle:
+    - Acronym ↔ full name: `IBM` = `International Business Machines Corporation`
+    - Dot-separated initials: `I.B.M.` = `IBM`
+    - Legal suffix noise: `Microsoft` = `Microsoft Corporation`
+    - Typos (1–2 edits): `nicrosoft` = `Microsoft`
+    - OCR character swaps: `Mic0rosoft` = `Microsoft`
+    - Semantic / world knowledge: `openi` = `OpenAI Group PBC`
+    - Different companies: `Microsoft` ≠ `Apple` → `false`
+
+    **Deep-search mode** (`deep_search=true`)
+
+    Performs a live web search for each company name *before* the verdict call.
+    Resolves trade names, DBA names, and local businesses absent from training data:
+    - `Thomas Electrical` → finds registered entity `THOMAS P. OWENS, LLC` → `true`
+    - Supply an optional `location_hint` (e.g. `"Colorado"`) to narrow down local businesses.
+    - Adds 3–10 s of latency. Groq uses OpenAI's web search for the research step.
+
+    **Provider selection**
+    - `groq` *(default)* — fastest, cheapest (`llama-3.1-8b-instant`)
+    - `openai` — higher accuracy + built-in web search for deep mode
+    - `gemini` — Google Search grounding for deep mode
+
+    Returns a synchronous result (no task polling required).
+    """
+    service = CompanyMatcherService()
+    return await service.match(request)
