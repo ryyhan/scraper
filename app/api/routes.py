@@ -32,6 +32,51 @@ from app.core.config import settings
 router = APIRouter()
 BROWSER_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_BROWSERS)
 
+
+def _persist_task_record_sync(
+    task_id: str,
+    status: str,
+    message: str,
+    result_data: Optional[Dict[str, Any]] = None,
+    task_type: Optional[str] = None,
+) -> None:
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task = session.get(TaskRecord, task_id)
+        if task:
+            task.status = status
+            task.message = message
+            if result_data is not None:
+                task.result_data = result_data
+            if task_type is not None:
+                task.task_type = task_type
+            task.updated_at = datetime.now(timezone.utc)
+            session.add(task)
+            session.commit()
+        else:
+            logger.error(
+                f"[task-persist] Task {task_id} not found in DB — result discarded."
+            )
+
+
+async def _persist_task_record(
+    task_id: str,
+    status: str,
+    message: str,
+    result_data: Optional[Dict[str, Any]] = None,
+    task_type: Optional[str] = None,
+) -> None:
+    """Safely persist task outcomes to SQLite in a worker thread to prevent event-loop blocking."""
+    await asyncio.to_thread(
+        _persist_task_record_sync,
+        task_id,
+        status,
+        message,
+        result_data,
+        task_type,
+    )
+
+
 async def process_scraping_task(task_id: str, request: SearchRequest, webhook_url: str):
     logger.info(f"Task {task_id}: Waiting for browser slot...")
     async with BROWSER_SEMAPHORE:
@@ -160,21 +205,13 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
             status = "FAILURE"
         
         # --- Save Result to DB ---
-        # Note: We create a new session here because this runs in background
-        from app.api.deps import engine
-        with Session(engine) as session:
-            task = session.get(TaskRecord, task_id)
-            if task:
-                task.status = status
-                task.message = message
-                task.result_data = final_result.model_dump()
-                task.updated_at = datetime.now(timezone.utc)
-                session.add(task)
-                session.commit()
-            else:
-                logger.error(
-                    f"[task-persist] Task {task_id} not found in DB — result discarded."
-                )
+        await _persist_task_record(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result_data=final_result.model_dump(),
+            task_type="scraper",
+        )
                 
         # --- Send External Webhook ---
         if webhook_url:
@@ -195,7 +232,7 @@ async def create_search_task(
     _rl: None = Depends(task_rate_limit),
 ):
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="scraper", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -212,9 +249,15 @@ async def get_failed_tasks(limit: int = 10, session: Session = Depends(get_sessi
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            (TaskRecord.message.contains("Scraper")) | 
-            (TaskRecord.message.contains("Timeout")) |
-            (TaskRecord.message == "Unknown error")
+            (TaskRecord.task_type == "scraper")
+            | (
+                (TaskRecord.task_type == "general")
+                & (
+                    TaskRecord.message.contains("Scraper")
+                    | TaskRecord.message.contains("Timeout")
+                    | (TaskRecord.message == "Unknown error")
+                )
+            )
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -293,20 +336,13 @@ async def _process_openai_search_task(task_id: str, request: OpenAISearchRequest
         logger.error(f"[openai-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
-    from app.api.deps import engine
-    with Session(engine) as session:
-        task = session.get(TaskRecord, task_id)
-        if task:
-            task.status = status
-            task.message = message
-            task.result_data = result_data
-            task.updated_at = datetime.now(timezone.utc)
-            session.add(task)
-            session.commit()
-        else:
-            logger.error(
-                f"[task-persist] Task {task_id} not found in DB — result discarded."
-            )
+    await _persist_task_record(
+        task_id=task_id,
+        status=status,
+        message=message,
+        result_data=result_data,
+        task_type="openai-search",
+    )
 
 
 @router.post("/openai-search/", summary="Search company contact info via OpenAI")
@@ -322,7 +358,7 @@ async def create_openai_search_task(
     Returns a *task_id* that can be polled via **GET /openai-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="openai-search", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -346,7 +382,13 @@ async def get_failed_openai_tasks(
     statement = (
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
-        .where(TaskRecord.message.contains("OpenAI"))  # type: ignore[union-attr]
+        .where(
+            (TaskRecord.task_type == "openai-search")
+            | (
+                (TaskRecord.task_type == "general")
+                & TaskRecord.message.contains("OpenAI")
+            )
+        )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
     )
@@ -431,20 +473,13 @@ async def _process_gemini_search_task(task_id: str, request: GeminiSearchRequest
         logger.error(f"[gemini-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
-    from app.api.deps import engine
-    with Session(engine) as session:
-        task = session.get(TaskRecord, task_id)
-        if task:
-            task.status = status
-            task.message = message
-            task.result_data = result_data
-            task.updated_at = datetime.now(timezone.utc)
-            session.add(task)
-            session.commit()
-        else:
-            logger.error(
-                f"[task-persist] Task {task_id} not found in DB — result discarded."
-            )
+    await _persist_task_record(
+        task_id=task_id,
+        status=status,
+        message=message,
+        result_data=result_data,
+        task_type="gemini-search",
+    )
 
 
 @router.post("/gemini-search/", summary="Search company contact info via Gemini")
@@ -463,7 +498,7 @@ async def create_gemini_search_task(
     Returns a *task_id* that can be polled via **GET /gemini-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="gemini-search", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -488,7 +523,11 @@ async def get_failed_gemini_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            TaskRecord.message.contains("Gemini")  # type: ignore[union-attr]
+            (TaskRecord.task_type == "gemini-search")
+            | (
+                (TaskRecord.task_type == "general")
+                & TaskRecord.message.contains("Gemini")
+            )
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -681,20 +720,13 @@ async def _process_voe_task(task_id: str, request: VoeRequest) -> None:
         logger.error(f"[verify-voe] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
-    from app.api.deps import engine
-    with Session(engine) as session:
-        task = session.get(TaskRecord, task_id)
-        if task:
-            task.status = status
-            task.message = message
-            task.result_data = result_data
-            task.updated_at = datetime.now(timezone.utc)
-            session.add(task)
-            session.commit()
-        else:
-            logger.error(
-                f"[task-persist] Task {task_id} not found in DB — result discarded."
-            )
+    await _persist_task_record(
+        task_id=task_id,
+        status=status,
+        message=message,
+        result_data=result_data,
+        task_type="voe",
+    )
 
 
 @router.post("/verify-voe/", summary="Verify employment of a person via Gemini, OpenAI, or both")
@@ -746,7 +778,7 @@ async def create_voe_task(
         )
 
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="voe", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -767,12 +799,14 @@ async def get_failed_voe_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            # "VOE verification error: ..." — normal failure path through except block.
-            # "Unknown error"              — task crashed before reaching except block
-            #                               (e.g. import error, OOM, task cancellation).
-            # Both must be covered so no failed VOE task is invisible in this endpoint.
-            TaskRecord.message.contains("verification")  # type: ignore[union-attr]
-            | (TaskRecord.message == "Unknown error")     # type: ignore[union-attr]
+            (TaskRecord.task_type == "voe")
+            | (
+                (TaskRecord.task_type == "general")
+                & (
+                    TaskRecord.message.contains("verification")
+                    | (TaskRecord.message == "Unknown error")
+                )
+            )
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -857,20 +891,13 @@ async def _process_combined_search_task(task_id: str, request: CombinedSearchReq
         logger.error(f"[combined-search] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
-    from app.api.deps import engine
-    with Session(engine) as session:
-        task = session.get(TaskRecord, task_id)
-        if task:
-            task.status = status
-            task.message = message
-            task.result_data = result_data
-            task.updated_at = datetime.now(timezone.utc)
-            session.add(task)
-            session.commit()
-        else:
-            logger.error(
-                f"[task-persist] Task {task_id} not found in DB — result discarded."
-            )
+    await _persist_task_record(
+        task_id=task_id,
+        status=status,
+        message=message,
+        result_data=result_data,
+        task_type="combined-search",
+    )
 
 
 @router.post("/combined-search/", summary="Search company contact info via combined OpenAI and Gemini")
@@ -888,7 +915,7 @@ async def create_combined_search_task(
     Returns a *task_id* that can be polled via **GET /combined-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="combined-search", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -913,7 +940,11 @@ async def get_failed_combined_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            TaskRecord.message.contains("combined")  # type: ignore[union-attr]
+            (TaskRecord.task_type == "combined-search")
+            | (
+                (TaskRecord.task_type == "general")
+                & TaskRecord.message.contains("combined")
+            )
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)
@@ -1358,20 +1389,13 @@ async def _process_find_poe_task(task_id: str, request: FindPoeRequest) -> None:
         logger.error(f"[find-poe] Task {task_id}: failed – {exc}")
 
     # Persist outcome to the shared TaskRecord table
-    from app.api.deps import engine
-    with Session(engine) as session:
-        task = session.get(TaskRecord, task_id)
-        if task:
-            task.status = status
-            task.message = message
-            task.result_data = result_data
-            task.updated_at = datetime.now(timezone.utc)
-            session.add(task)
-            session.commit()
-        else:
-            logger.error(
-                f"[task-persist] Task {task_id} not found in DB — result discarded."
-            )
+    await _persist_task_record(
+        task_id=task_id,
+        status=status,
+        message=message,
+        result_data=result_data,
+        task_type="find-poe",
+    )
 
 
 @router.post("/find-poe/", summary="Find the likely employer of a person")
@@ -1421,7 +1445,7 @@ async def create_find_poe_task(
         )
 
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, status="IN_PROGRESS")
+    task_record = TaskRecord(task_id=task_id, task_type="find-poe", status="IN_PROGRESS")
     session.add(task_record)
     session.commit()
 
@@ -1442,8 +1466,14 @@ async def get_failed_find_poe_tasks(
         select(TaskRecord)
         .where(TaskRecord.status == "FAILURE")
         .where(
-            TaskRecord.message.contains("FindPOE")  # type: ignore[union-attr]
-            | (TaskRecord.message == "Unknown error")  # type: ignore[union-attr]
+            (TaskRecord.task_type == "find-poe")
+            | (
+                (TaskRecord.task_type == "general")
+                & (
+                    TaskRecord.message.contains("FindPOE")
+                    | (TaskRecord.message == "Unknown error")
+                )
+            )
         )
         .order_by(desc(TaskRecord.updated_at))
         .limit(limit)

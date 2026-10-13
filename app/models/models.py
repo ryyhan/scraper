@@ -287,6 +287,26 @@ class StructuredAddress(BaseModel):
         return _resolve_contact_tag(v)
 
 
+def _filter_structured_addresses(v: Any) -> list:
+    """List-level validator: try to build each StructuredAddress and silently drop invalid items.
+
+    This prevents a single malformed address (e.g. non-dict or invalid schema)
+    from invalidating the entire company info model.
+    """
+    if not isinstance(v, list):
+        return v
+    result = []
+    for item in v:
+        if isinstance(item, StructuredAddress):
+            result.append(item)
+            continue
+        try:
+            result.append(StructuredAddress.model_validate(item))
+        except Exception as exc:
+            logger.debug(f"[models] Dropping invalid address item {item!r}: {exc}")
+    return result
+
+
 class HintAddress(BaseModel):
     """
     Optional address hint supplied by the caller to help the LLM disambiguate
@@ -417,6 +437,11 @@ class OpenAICompanyInfo(BaseModel):
     def drop_invalid_contacts(cls, v: Any) -> list:
         return _filter_tagged_contacts(v)
 
+    @field_validator("addresses", mode="before")
+    @classmethod
+    def drop_invalid_addresses(cls, v: Any) -> list:
+        return _filter_structured_addresses(v)
+
 
 
 class OpenAISearchResult(BaseModel):
@@ -473,6 +498,11 @@ class GeminiCompanyInfo(BaseModel):
     @classmethod
     def drop_invalid_contacts(cls, v: Any) -> list:
         return _filter_tagged_contacts(v)
+
+    @field_validator("addresses", mode="before")
+    @classmethod
+    def drop_invalid_addresses(cls, v: Any) -> list:
+        return _filter_structured_addresses(v)
 
 
 class GeminiSearchResult(BaseModel):
@@ -902,8 +932,9 @@ class CompanyMatchResult(BaseModel):
 
 class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)
-    status: str = Field(default="PENDING")  # PENDING, IN_PROGRESS, SUCCESS, FAILURE
+    task_type: str = Field(default="general", index=True)
+    status: str = Field(default="PENDING", index=True)  # PENDING, IN_PROGRESS, SUCCESS, FAILURE
     message: Optional[str] = Field(default=None)
     result_data: Optional[Dict[str, Any]] = Field(default=None, sa_type=JSON)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

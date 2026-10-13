@@ -6,7 +6,6 @@ groq==1.0.0
 openai==2.30.0
 google-genai==1.71.0
 sqlmodel==0.0.34
-aiosqlite==0.22.1
 beautifulsoup4==4.14.3
 httpx==0.28.1
 pydantic==2.12.5

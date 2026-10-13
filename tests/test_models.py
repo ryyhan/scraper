@@ -123,7 +123,27 @@ def test_task_record_model():
     """Verify TaskRecord default values and field assignment."""
     task = TaskRecord(task_id="test-uuid-123")
     assert task.status == "PENDING"
+    assert task.task_type == "general"
     assert task.message is None
     assert task.result_data is None
     assert task.created_at is not None
     assert task.updated_at is not None
+
+
+def test_company_info_address_sanitization():
+    """Verify that malformed address items are dropped without failing the entire model."""
+    from app.models import OpenAICompanyInfo, GeminiCompanyInfo, StructuredAddress
+
+    raw_addresses = [
+        {"address1": "123 Main St", "city": "Dallas", "state": "TX", "tag": "Headquarters"},
+        "invalid-address-format",
+        StructuredAddress(address1="456 Side St", city="Plano", state="TX", tag=ContactTag.CORPORATE),
+    ]
+
+    info = OpenAICompanyInfo(addresses=raw_addresses)
+    assert len(info.addresses) == 2
+    assert info.addresses[0].address1 == "123 Main St"
+    assert info.addresses[1].address1 == "456 Side St"
+
+    gemini_info = GeminiCompanyInfo(addresses=raw_addresses)
+    assert len(gemini_info.addresses) == 2

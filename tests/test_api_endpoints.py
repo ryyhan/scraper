@@ -125,3 +125,35 @@ async def test_scraping_task_timeout_status_failure(db_session):
     assert task is not None
     assert task.status == "FAILURE"
     assert "timeout limit" in task.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_failed_tasks_filtered_by_task_type(client, db_session):
+    """Verify failed task endpoints only return tasks for their respective pipeline via task_type."""
+    # Create 1 failed scraper task, 1 failed openai-search task, 1 failed gemini-search task
+    db_session.add(TaskRecord(task_id="t-scrape", task_type="scraper", status="FAILURE", message="Scraper failed"))
+    db_session.add(TaskRecord(task_id="t-openai", task_type="openai-search", status="FAILURE", message="Connection reset by peer"))
+    db_session.add(TaskRecord(task_id="t-gemini", task_type="gemini-search", status="FAILURE", message="DNS resolution error"))
+    db_session.commit()
+
+    # Query /google-search/failed/
+    res_scrape = await client.get("/google-search/failed/")
+    assert res_scrape.status_code == 200
+    scrape_ids = [t["task_id"] for t in res_scrape.json()["failed_tasks"]]
+    assert "t-scrape" in scrape_ids
+    assert "t-openai" not in scrape_ids
+
+    # Query /openai-search/failed/
+    res_openai = await client.get("/openai-search/failed/")
+    assert res_openai.status_code == 200
+    openai_ids = [t["task_id"] for t in res_openai.json()["failed_tasks"]]
+    assert "t-openai" in openai_ids
+    assert "t-scrape" not in openai_ids
+    assert "t-gemini" not in openai_ids
+
+    # Query /gemini-search/failed/
+    res_gemini = await client.get("/gemini-search/failed/")
+    assert res_gemini.status_code == 200
+    gemini_ids = [t["task_id"] for t in res_gemini.json()["failed_tasks"]]
+    assert "t-gemini" in gemini_ids
+    assert "t-openai" not in gemini_ids
