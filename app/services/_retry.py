@@ -77,6 +77,7 @@ import logging as _logging
 from tenacity import (
     before_sleep_log,
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
@@ -109,19 +110,37 @@ _JITTER: float = 2.0         # random jitter added to each wait
 # Provider: Gemini  (google-genai SDK)
 # ---------------------------------------------------------------------------
 
-def retry_gemini() -> "retry":
+def _is_retryable_gemini_error(exc: BaseException) -> bool:
     """
-    Return a ``tenacity`` retry decorator configured for the Gemini SDK.
+    Determine if an exception from the Google GenAI SDK should be retried.
 
-    Retries on:
-      * ``google.api_core.exceptions.ResourceExhausted`` — HTTP 429 quota exceeded
-      * ``google.api_core.exceptions.ServiceUnavailable``  — HTTP 503 transient error
-      * ``google.api_core.exceptions.InternalServerError`` — HTTP 500 transient error
-      * ``google.api_core.exceptions.DeadlineExceeded``   — request timeout
+    Retryable cases:
+      - ``ServerError``: 5xx server-side errors from Gemini API.
+      - ``ClientError``: 429 (Resource Exhausted / Rate limit) and 408 (Request Timeout).
+      - ``APIError``: general APIError with status 429, 408, or >= 500.
+      - ``httpx.TimeoutException`` / ``httpx.NetworkError``: transport-level network hiccups.
+      - ``google.api_core`` exceptions (ResourceExhausted, ServiceUnavailable, etc.) if installed.
 
-    Falls back to catching all ``Exception`` if the google-api-core package
-    is not installed (defensive import).
+    Non-retryable cases:
+      - 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, ValueError, etc.
     """
+    try:
+        from google.genai.errors import APIError, ClientError, ServerError
+        if isinstance(exc, ServerError):
+            return True
+        if isinstance(exc, ClientError):
+            code = getattr(exc, "code", None)
+            return code in (408, 429)
+        if isinstance(exc, APIError):
+            code = getattr(exc, "code", None)
+            return code in (408, 429) or (code is not None and code >= 500)
+    except ImportError:
+        pass
+
+    import httpx
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+
     try:
         from google.api_core.exceptions import (
             DeadlineExceeded,
@@ -129,19 +148,28 @@ def retry_gemini() -> "retry":
             ResourceExhausted,
             ServiceUnavailable,
         )
-        exc_types: tuple = (
-            ResourceExhausted,
-            ServiceUnavailable,
-            InternalServerError,
-            DeadlineExceeded,
-        )
+        if isinstance(exc, (ResourceExhausted, ServiceUnavailable, InternalServerError, DeadlineExceeded)):
+            return True
     except ImportError:
-        exc_types = (Exception,)
+        pass
 
+    return False
+
+
+def retry_gemini() -> "retry":
+    """
+    Return a ``tenacity`` retry decorator configured for the Google GenAI SDK.
+
+    Retries on:
+      * ``google.genai.errors.ServerError`` — HTTP 5xx server-side errors
+      * ``google.genai.errors.ClientError`` — HTTP 429 (quota exceeded) and HTTP 408 (timeout)
+      * ``httpx.TimeoutException`` / ``httpx.NetworkError`` — transport network failures
+      * ``google.api_core.exceptions`` — if present in the runtime environment
+    """
     return retry(
         stop=stop_after_attempt(_ATTEMPTS),
         wait=wait_exponential_jitter(initial=_INITIAL_WAIT, max=_MAX_WAIT, jitter=_JITTER),
-        retry=retry_if_exception_type(exc_types),
+        retry=retry_if_exception(_is_retryable_gemini_error),
         before_sleep=before_sleep_log(_log, _logging.WARNING),
         reraise=True,
     )
