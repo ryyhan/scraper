@@ -2,32 +2,129 @@ import asyncio
 import re
 from typing import List, Optional
 from urllib.parse import urljoin
-from playwright.async_api import async_playwright, Error as PlaywrightError
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Playwright,
+    Error as PlaywrightError,
+)
 from loguru import logger
 from playwright_stealth import Stealth
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.core.config import settings
 from app.models.models import _EMAIL_REGEX  # reuse the authoritative validator
 
+
+class BrowserPool:
+    """
+    Manages a persistent, shared Playwright Chromium browser process.
+
+    Instead of launching and tearing down a full Chromium process for every
+    individual scrape task (which incurs 1.5–3.0 s of cold-start latency and
+    heavy CPU churn), the pool keeps a persistent browser alive and creates
+    lightweight, isolated incognito contexts (``browser.new_context()``) per task.
+    """
+
+    _instance: Optional["BrowserPool"] = None
+
+    def __init__(self) -> None:
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "BrowserPool":
+        """Return the process-wide BrowserPool singleton."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @property
+    def is_running(self) -> bool:
+        """True if the persistent browser is launched and connected."""
+        return self._browser is not None and self._browser.is_connected()
+
+    async def start(self) -> Browser:
+        """
+        Initialize Playwright and launch the persistent Chromium browser if not already running.
+        """
+        async with self._lock:
+            if self._browser and self._browser.is_connected():
+                return self._browser
+
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+
+            logger.info("[BrowserPool] Launching persistent Chromium browser...")
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            logger.info("[BrowserPool] Persistent Chromium browser launched successfully.")
+            return self._browser
+
+    async def get_browser(self) -> Browser:
+        """
+        Return the running browser instance, automatically restarting it if disconnected.
+        """
+        if self._browser and self._browser.is_connected():
+            return self._browser
+        return await self.start()
+
+    async def new_context(self, **kwargs) -> BrowserContext:
+        """
+        Create a new isolated incognito browser context from the persistent browser.
+        """
+        browser = await self.get_browser()
+        return await browser.new_context(**kwargs)
+
+    async def close(self) -> None:
+        """
+        Gracefully close the persistent browser and stop Playwright on application shutdown.
+        """
+        async with self._lock:
+            if self._browser:
+                try:
+                    await self._browser.close()
+                    logger.info("[BrowserPool] Persistent Chromium browser closed.")
+                except Exception as e:
+                    logger.debug(f"[BrowserPool] Error closing browser: {e}")
+                finally:
+                    self._browser = None
+
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                    logger.info("[BrowserPool] Playwright stopped.")
+                except Exception as e:
+                    logger.debug(f"[BrowserPool] Error stopping playwright: {e}")
+                finally:
+                    self._playwright = None
+
+
 class ScraperService:
     """
     Manages Playwright browser sessions and provides scraping methods.
+    Uses the persistent BrowserPool by default to avoid per-task cold-start latency.
     """
-    
-    def __init__(self):
-        self.playwright = None
-        self.browser = None
+
+    def __init__(self, browser: Optional[Browser] = None):
+        self.browser: Optional[Browser] = browser
+        self._owned_browser: bool = False
 
     async def __aenter__(self):
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
+        if self.browser is None:
+            self.browser = await BrowserPool.get_instance().get_browser()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.browser:
+        if self._owned_browser and self.browser:
             await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
 
     async def perform_duckduckgo_search(self, query: str) -> List[str]:
         """

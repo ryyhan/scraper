@@ -15,6 +15,7 @@ if sys.platform == "win32":
 from app.core.config import settings
 from app.api.deps import engine
 from app.api.routes import router as api_router
+from app.services.scraper import BrowserPool
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
@@ -23,8 +24,15 @@ def create_db_and_tables():
 async def lifespan(app: FastAPI):
     create_db_and_tables()
     logger.info("Application startup: DB connected, tables checked.")
+    try:
+        await BrowserPool.get_instance().start()
+    except Exception as e:
+        logger.warning(
+            f"Failed to pre-warm persistent Playwright browser pool on startup (will initialize on demand): {e}"
+        )
     yield
-    logger.info("Application shutdown.")
+    await BrowserPool.get_instance().close()
+    logger.info("Application shutdown: browser pool closed.")
 
 app = FastAPI(title="Async Scraper API", lifespan=lifespan)
 app.include_router(api_router)

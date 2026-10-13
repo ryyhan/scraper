@@ -1,4 +1,4 @@
-from .scraper import ScraperService
+from .scraper import ScraperService, BrowserPool
 from .llm import LLMService
 from .webhook import WebhookService
 from .openai_search import OpenAISearchService
