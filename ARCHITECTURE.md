@@ -1,14 +1,17 @@
 # Scraper Service Architecture
 
-This document describes the architectural flow of the asynchronous, FastAPI-based scraping application.
+This document describes the architectural flow, component relationships, concurrency controls, and reliability mechanisms of the asynchronous, FastAPI-based scraping and intelligence application.
 
 ## Core Technologies
-- **API Framework**: FastAPI
-- **Database**: SQLite (managed via SQLModel, WAL mode + 30 s busy_timeout)
+
+- **API Framework**: FastAPI 0.129.0
+- **Database**: SQLite (managed via SQLModel, WAL journal mode + 30 s `busy_timeout`)
 - **Scraping Engine**: HTTPX (initial search) & Playwright Async + Stealth (deep page interaction)
-- **AI Extraction (scraper pipeline)**: Groq API (`llama-3.1-8b-instant`)
+- **AI Extraction (Scraper pipeline)**: Groq API (`llama-3.1-8b-instant`)
 - **AI Search (OpenAI pipeline)**: OpenAI Responses API with `web_search` tool (`gpt-4o-mini`)
-- **AI Search (Gemini pipeline)**: Gemini with live Google Search grounding (`gemini-2.5-flash-lite`)
+- **AI Search (Gemini pipeline)**: Google Gemini with live Google Search grounding (`gemini-2.5-flash-lite`)
+- **Employment Verification (VOE) & Discovery (POE)**: Gemini and OpenAI multi-turn grounded research
+- **Company Identity Matching**: Groq / OpenAI / Gemini entity resolution with optional deep search
 - **PDF Processing**: Gemini Files API or OpenAI vision (`pypdfium2` page rendering)
 - **Logging**: Loguru (file: `scraper.log`, rotation 100 MB, retention 30 days)
 
@@ -16,7 +19,7 @@ This document describes the architectural flow of the asynchronous, FastAPI-base
 
 ## 1. High-Level Flow Diagram
 
-The following flowchart illustrates the entire lifecycle of a scraping request, from incoming API call to the final webhook delivery.
+The following flowchart illustrates the entire lifecycle of an asynchronous scraping request, from incoming API call to the final webhook delivery and database persistence.
 
 ```mermaid
 flowchart TD
@@ -28,7 +31,7 @@ flowchart TD
         C -->|Return task_id| E[Response 200 OK]
     end
     
-    C -->|Trigger| F[Background Task]
+    C -->|Trigger| F[FastAPI BackgroundTask]
     
     subgraph "Async Background Process (Controlled via Semaphore)"
         F --> G[ScraperService: DuckDuckGo HTML or Serper via HTTPX]
@@ -56,32 +59,34 @@ flowchart TD
     R --> S[Update DB Record]
     I --> S
     
-    S --> T[WebhookService: Push payload to External Client]
+    S --> T{Webhook URL provided?}
+    T -->|Yes| U[WebhookService: Push payload to External Client]
+    T -->|No| V[Awaiting Client Polling]
 ```
 
 ---
 
-## 2. Sequence Diagram
+## 2. Sequence Diagram: Core Scraper Pipeline
 
-This sequence diagram details the interaction between the core internal services.
+This sequence diagram details the interaction between the core internal services during a `/google-search/` execution.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant App as FastAPI
-    participant DB as SQLite
+    participant DB as SQLite (tasks.db)
     participant Worker as Background Task
     participant Scraper as ScraperService
     participant LLM as LLMService (Groq)
     participant Webhook as WebhookService
 
     User->>App: POST /google-search/ {"poe_name": "Example Corp"}
-    App->>DB: INSERT Task (id, status=IN_PROGRESS)
+    App->>DB: INSERT TaskRecord (id, status=IN_PROGRESS)
     App->>Worker: Dispatch `process_scraping_task`
     App-->>User: HTTP 200 {"task_id": "...", "status": "IN_PROGRESS"}
     
     rect rgb(245, 245, 245)
-        Note right of Worker: Background Processing Flow
+        Note right of Worker: Background Processing Flow (Gated by BROWSER_SEMAPHORE)
         
         Worker->>Scraper: perform_duckduckgo_search("Example Corp")
         Note right of Scraper: Uses httpx to bypass JS bot-detection
@@ -106,26 +111,31 @@ sequenceDiagram
         LLM-->>Worker: Structured ContactInfo Dictionary
     end
     
-    Worker->>DB: UPDATE Task (status, result_data)
-    Worker->>Webhook: submit_result(webhook_url, final_payload)
+    Worker->>DB: UPDATE TaskRecord (status=SUCCESS, result_data=...)
+    opt Webhook URL set
+        Worker->>Webhook: submit_result(webhook_url, final_payload)
+    end
 ```
 
 ---
 
-## 3. Additional Pipelines
+## 3. Comprehensive Pipeline Catalog
 
-Beyond the core Playwright scraper, the service exposes four additional LLM-backed pipelines:
+The service exposes 9 dedicated intelligence pipelines:
 
-| Endpoint | Provider | Method | Output |
+| Endpoint | Provider | Execution | Primary Output |
 |---|---|---|---|
-| `POST /openai-search/` | OpenAI (`gpt-4o-mini`) | Responses API + `web_search` | Tagged phones/faxes/emails/addresses |
-| `POST /gemini-search/` | Gemini (`gemini-2.5-flash-lite`) | Live Google Search grounding | Tagged phones/faxes/emails/addresses |
-| `POST /combined-search/` | OpenAI + Gemini (concurrent) | Both pipelines, deduplicated | Merged + summary stats |
-| `POST /verify-voe/` | Gemini, OpenAI, or both | Web research + structured scoring | Confidence score + verdict |
-| `POST /extract-pdf/` | Gemini Files API or OpenAI vision | Whole-PDF or page-by-page rendering | Full extracted text |
-| `POST /parse-background-check/` | Gemini Files API or OpenAI vision | Two-stage extract → structure | 7 structured fields |
+| `POST /google-search/` | DuckDuckGo/Serper + Playwright + Groq | Async (Background) | Crawled & extracted company contact info |
+| `POST /openai-search/` | OpenAI (`gpt-4o-mini`) | Async (Background) | 3-turn grounded contacts with departmental tags |
+| `POST /gemini-search/` | Gemini (`gemini-2.5-flash-lite`) | Async (Background) | 3 parallel sub-gatherers with Google Search grounding |
+| `POST /combined-search/` | OpenAI + Gemini (concurrent) | Async (Background) | Merged, deduplicated contacts + summary counts |
+| `POST /verify-voe/` | Gemini, OpenAI, or both | Async (Background) | Employment verification verdict + confidence score (0–10) |
+| `POST /find-poe/` | Gemini, OpenAI, or both | Async (Background) | Ranked employer candidates list for an individual |
+| `POST /match-companies/` | Groq, OpenAI, or Gemini | Synchronous | Company entity resolution verdict & confidence |
+| `POST /extract-pdf/` | Gemini Files API or OpenAI vision | Synchronous | Full OCR text with checkbox states (`[SELECTED]`) |
+| `POST /parse-background-check/` | Gemini Files API or OpenAI vision | Synchronous | 7 structured fields from background screening reports |
 
-All async pipelines are enqueued as FastAPI `BackgroundTasks` and return a `task_id` for polling. PDF endpoints are synchronous (response returned directly).
+All async pipelines return a `task_id` for polling via `GET /{pipeline}/{task_id}` and failed task inspection via `GET /{pipeline}/failed/`. PDF endpoints and the company matcher are synchronous.
 
 ---
 
@@ -134,47 +144,76 @@ All async pipelines are enqueued as FastAPI `BackgroundTasks` and return a `task
 ```
 app/
 ├── api/
-│   ├── deps.py       — SQLite engine (WAL mode), get_session() dependency
-│   ├── rate_limit.py — Sliding-window rate limiter (15 req/60 s per IP)
-│   └── routes.py     — All endpoint definitions and background task coroutines
+│   ├── deps.py             — SQLite engine (WAL mode), get_session() dependency
+│   ├── rate_limit.py       — In-process sliding-window rate limiter (15 req/60 s per IP)
+│   └── routes.py           — All endpoint definitions and background task coroutines
 ├── core/
-│   └── config.py     — Pydantic Settings (env-file backed)
+│   └── config.py           — Pydantic BaseSettings (env-file backed configuration)
 ├── models/
-│   └── models.py     — All Pydantic request/response schemas + SQLModel TaskRecord
+│   ├── __init__.py         — Models package exports
+│   └── models.py           — Pydantic schemas (Request/Response) + SQLModel TaskRecord
 └── services/
-    ├── _retry.py          — Dual-layer tenacity retry factories (Gemini, OpenAI, Groq)
-    ├── scraper.py         — Playwright browser lifecycle + HTTPX search methods
-    ├── llm.py             — Groq inference (site verification + contact extraction)
-    ├── openai_search.py   — OpenAI two-step search pipeline
-    ├── gemini_search.py   — Gemini two-step search pipeline
-    ├── combined_search.py — Concurrent OpenAI + Gemini merge + deduplication
+    ├── __init__.py         — Service package exports
+    ├── _retry.py           — Dual-layer tenacity retry factories (Gemini, OpenAI, Groq)
+    ├── _token_utils.py     — Token normalization helpers across LLM providers
+    ├── scraper.py          — Playwright browser lifecycle + HTTPX search methods
+    ├── llm.py              — Groq inference (site verification + contact extraction)
+    ├── openai_search.py    — OpenAI 3-turn search pipeline
+    ├── gemini_search.py    — Gemini 3-sub-gatherer search pipeline
+    ├── combined_search.py  — Concurrent OpenAI + Gemini merge, deduplication, URL hygiene
     ├── voe_verification.py — Gemini employment verification
-    ├── openai_voe.py      — OpenAI employment verification
-    ├── pdf_extractor.py   — PDF text extraction (Gemini Files API / OpenAI vision)
-    ├── bg_check_parser.py — Background check two-stage parsing pipeline
-    └── webhook.py         — HTTP webhook push
-main.py — Uvicorn entry point, lifespan DB init
+    ├── openai_voe.py       — OpenAI employment verification
+    ├── gemini_find_poe.py  — Gemini employer discovery pipeline
+    ├── openai_find_poe.py  — OpenAI employer discovery pipeline
+    ├── company_matcher.py  — Entity resolution service (standard + deep search)
+    ├── pdf_extractor.py    — PDF text extraction (Gemini Files API / OpenAI vision)
+    ├── bg_check_parser.py  — Background check two-stage parsing pipeline
+    └── webhook.py          — HTTP webhook push service
+main.py                     — Uvicorn entry point, lifespan DB init, Loguru logging setup
 ```
 
 ---
 
-## 5. Concurrency & Reliability
+## 5. Concurrency, Reliability & Resilience
 
-### Browser Semaphore
-A global `asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)` gates all Playwright tasks. Even under heavy load only `MAX_CONCURRENT_BROWSERS` (default 4, configurable via `.env`) browser instances run concurrently — the rest queue safely in the event loop.
+### Browser Semaphore Gate
+A global `asyncio.Semaphore(MAX_CONCURRENT_BROWSERS)` gates all Playwright tasks. Even under heavy concurrent request spikes, only `MAX_CONCURRENT_BROWSERS` (default 4, configurable via `.env`) active Chromium instances run at once. Extra tasks queue safely in the asyncio event loop.
 
-### Rate Limiter
-A per-IP sliding-window rate limiter (`rate_limit.py`) caps task-creation endpoints at **15 requests per 60 seconds**. Implemented as a FastAPI `Depends()` applied per-route (not global middleware) so health-check and polling endpoints are unaffected.
+### In-Process Sliding-Window Rate Limiter
+A per-IP sliding-window rate limiter (`app/api/rate_limit.py`) caps task-creation endpoints at **15 requests per 60 seconds**.
+- Applied per-route via `Depends(task_rate_limit)`.
+- Respects `X-Forwarded-For` reverse-proxy headers (takes the leftmost address).
+- Throttled requests immediately receive **HTTP 429 Too Many Requests** with `Retry-After: <seconds>` headers.
 
-### Retry Strategy (dual-layer)
+### Dual-Layer Retry Architecture
+All network calls to AI providers utilize a nested retry structure:
+
 ```
-Layer 1 — SDK-native (inner):  OpenAI/Groq max_retries=2, Gemini HttpRetryOptions(attempts=2)
-           Reads Retry-After headers; handles 429/5xx with minimal latency.
-Layer 2 — tenacity (outer):    3 attempts, exponential backoff 3–60 s + jitter.
-           Catches timeouts, DeadlineExceeded, and errors the SDK exhausted.
-
-Combined ceiling: 3 (tenacity) × 3 (SDK) = 9 max API calls per logical request.
+Layer 1 — SDK-Native (Inner):
+    • OpenAI / Groq: max_retries=2 (respects HTTP Retry-After headers on 429/5xx)
+    • Gemini: types.HttpRetryOptions(attempts=2)
+Layer 2 — Tenacity (Outer):
+    • 3 attempts, exponential backoff with full jitter (3 s to 60 s)
+    • Catches DeadlineExceeded, socket drops, and errors exhausted by Layer 1
+Total Call Ceiling:
+    3 (tenacity) × 3 (1 initial + 2 SDK retries) = 9 maximum API calls per request
 ```
 
-### SQLite Concurrency
-SQLite is configured with WAL journal mode, `busy_timeout=30 000 ms`, and `synchronous=NORMAL` — allowing concurrent reads during writes and tolerating short lock contention without raising `SQLITE_BUSY` errors.
+### SQLite Concurrency (WAL Mode)
+SQLite is configured with production-grade pragmas on every connection:
+- `PRAGMA journal_mode=WAL;` — Readers do not block writers, writers do not block readers.
+- `PRAGMA busy_timeout=30000;` — Waits up to 30 seconds for lock release before raising `OperationalError`.
+- `PRAGMA synchronous=NORMAL;` — Optimal balance between disk I/O performance and crash durability.
+- Connection Pool: `pool_size=5`, `max_overflow=10`, `pool_recycle=1800` (recycles connections every 30 minutes), and `check_same_thread=False`.
+
+### Anti-Hallucination Triple-Pass Verification
+For grounded search endpoints (`/openai-search/` and `/gemini-search/`):
+1. **Gatherer**: Researches the live web and generates cited Markdown notes.
+2. **Extractor**: Converts cited findings into typed Pydantic models.
+3. **Verifier**: A dedicated LLM fact-checking pass cross-examines every extracted contact against the raw citations. Phone/fax numbers are normalized using digit-only comparison to prevent false positives from formatting differences.
+
+### Token Accounting
+A normalized `TokenUsage` object is calculated across pipelines:
+- Captures input tokens, output tokens, and total tokens.
+- Normalizes disparate SDK naming conventions (e.g., Gemini's `prompt_token_count` vs. OpenAI's `input_tokens`).
+- Combined endpoints report both provider-specific metrics and a consolidated `grand_total`.
