@@ -110,3 +110,49 @@ async def test_reset_rate_limit_store():
 
     async with _store_lock:
         assert len(_store) == 0
+
+
+@pytest.mark.asyncio
+async def test_task_rate_limit_untrusted_proxy_ignores_forwarded_for(monkeypatch):
+    """Verify spoofed X-Forwarded-For is ignored when direct client is not a trusted proxy."""
+    from unittest.mock import MagicMock
+    from app.api.rate_limit import task_rate_limit
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "127.0.0.1,::1")
+    await reset_rate_limit_store()
+
+    # Direct client IP is an untrusted public IP
+    req = MagicMock()
+    req.client.host = "203.0.113.50"
+    req.headers = {"X-Forwarded-For": "1.2.3.4, 5.6.7.8"}
+
+    await task_rate_limit(req)
+
+    async with _store_lock:
+        # Rate limit store should track the direct IP, NOT the spoofed header IP
+        assert "203.0.113.50" in _store
+        assert "1.2.3.4" not in _store
+
+
+@pytest.mark.asyncio
+async def test_task_rate_limit_trusted_proxy_honors_forwarded_for(monkeypatch):
+    """Verify X-Forwarded-For is honored when direct client is a trusted proxy."""
+    from unittest.mock import MagicMock
+    from app.api.rate_limit import task_rate_limit
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "127.0.0.1,::1")
+    await reset_rate_limit_store()
+
+    # Direct client is a local reverse proxy
+    req = MagicMock()
+    req.client.host = "127.0.0.1"
+    req.headers = {"X-Forwarded-For": "198.51.100.99, 10.0.0.1"}
+
+    await task_rate_limit(req)
+
+    async with _store_lock:
+        # Rate limit store should track the forwarded client IP
+        assert "198.51.100.99" in _store
+        assert "127.0.0.1" not in _store

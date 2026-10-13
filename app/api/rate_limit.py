@@ -194,25 +194,28 @@ async def _check_rate_limit(ip: str) -> None:
 # FastAPI dependency
 # ---------------------------------------------------------------------------
 
+from app.core.config import settings
+
+
 async def task_rate_limit(request: Request) -> None:
     """
     FastAPI dependency that applies the sliding-window rate limit.
 
-    Resolves the client IP from ``X-Forwarded-For`` (set by a reverse proxy
-    such as nginx or a cloud load balancer) with a fallback to the direct
-    connection IP.  The first address in ``X-Forwarded-For`` is used because
-    that is the original client IP in a standard proxy chain::
-
-        X-Forwarded-For: <client>, <proxy1>, <proxy2>
-
-    If you are not behind a trusted reverse proxy, remove the
-    ``X-Forwarded-For`` branch to prevent IP spoofing.
+    Resolves the client IP safely:
+    - If the direct connection originates from a trusted proxy (matching
+      ``settings.TRUSTED_PROXIES`` or if set to '*'), the leftmost IP in
+      ``X-Forwarded-For`` is used as the original client IP.
+    - Otherwise, ``request.client.host`` (the direct connection IP) is used
+      to prevent IP spoofing by clients submitting forged ``X-Forwarded-For`` headers.
     """
+    direct_ip = request.client.host if request.client else "unknown"
     forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
+
+    trusted = [p.strip() for p in settings.TRUSTED_PROXIES.split(",") if p.strip()]
+    if forwarded_for and ("*" in trusted or direct_ip in trusted):
         # Take the leftmost address (original client).
         client_ip = forwarded_for.split(",")[0].strip()
     else:
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = direct_ip
 
     await _check_rate_limit(client_ip)

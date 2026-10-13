@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     WEBHOOK_URL: Optional[str] = None
     MAX_CONCURRENT_BROWSERS: int = 4
     PDF_MAX_FILE_SIZE_MB: int = 20  # Maximum PDF upload size for /extract-pdf/
+    TRUSTED_PROXIES: str = "127.0.0.1,::1,testclient"  # Comma-separated list or '*'
 
     # LLM model names — override via .env to switch models without code changes.
     OPENAI_MODEL: str = "gpt-4o-mini"
