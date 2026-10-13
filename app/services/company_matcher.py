@@ -51,8 +51,21 @@ from functools import partial
 from typing import Any
 
 from fastapi import HTTPException, status
-from groq import AsyncGroq, RateLimitError as GroqRateLimitError, APIStatusError as GroqAPIStatusError
-from openai import AsyncOpenAI, OpenAI, RateLimitError as OAIRateLimitError, APIStatusError as OAIAPIStatusError
+from groq import (
+    AsyncGroq,
+    RateLimitError as GroqRateLimitError,
+    APIStatusError as GroqAPIStatusError,
+    APIConnectionError as GroqAPIConnectionError,
+    APITimeoutError as GroqAPITimeoutError,
+)
+from openai import (
+    AsyncOpenAI,
+    OpenAI,
+    RateLimitError as OAIRateLimitError,
+    APIStatusError as OAIAPIStatusError,
+    APIConnectionError as OAIAPIConnectionError,
+    APITimeoutError as OAIAPITimeoutError,
+)
 from loguru import logger
 
 from app.core.config import settings
@@ -547,7 +560,7 @@ class CompanyMatcherService:
                 max_tokens=1024,
                 response_format={"type": "json_object"},
             )
-        except (GroqRateLimitError, GroqAPIStatusError):
+        except (GroqRateLimitError, GroqAPIStatusError, GroqAPIConnectionError, GroqAPITimeoutError):
             raise  # let retry_groq() handle it
         raw = response.choices[0].message.content or ""
         return _parse_llm_json(raw, "groq")
@@ -593,7 +606,7 @@ class CompanyMatcherService:
                 max_completion_tokens=1024,
                 response_format={"type": "json_object"},
             )
-        except (OAIRateLimitError, OAIAPIStatusError):
+        except (OAIRateLimitError, OAIAPIStatusError, OAIAPIConnectionError, OAIAPITimeoutError):
             raise  # let retry_openai() handle it
         raw = response.choices[0].message.content or ""
         return _parse_llm_json(raw, "openai")

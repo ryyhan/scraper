@@ -1,10 +1,12 @@
 import json
 from typing import List, Optional
-from groq import AsyncGroq, RateLimitError, APIStatusError
+from groq import AsyncGroq, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
 from loguru import logger
 from app.models import ContactInfo
 from app.core.config import settings
 from app.services._retry import retry_groq
+
+_GROQ_RETRY_ERRORS = (RateLimitError, APIStatusError, APIConnectionError, APITimeoutError)
 
 class LLMService:
     def __init__(self):
@@ -43,7 +45,7 @@ class LLMService:
             if "NOT_FOUND" in result:
                 return ""
             return result
-        except (RateLimitError, APIStatusError) as e:
+        except _GROQ_RETRY_ERRORS as e:
             logger.error(f"Groq API error (will be retried by tenacity if attempts remaining): {e}")
             raise # Re-raise so tenacity can catch it
         except Exception as e:
@@ -97,7 +99,7 @@ class LLMService:
         except json.JSONDecodeError:
             logger.error("Failed to decode JSON from LLM response.")
             return None
-        except (RateLimitError, APIStatusError) as e:
+        except _GROQ_RETRY_ERRORS as e:
             logger.error(f"Groq API error (will be retried by tenacity if attempts remaining): {e}")
             raise # Re-raise so tenacity can catch it
         except Exception as e:
@@ -151,7 +153,7 @@ class LLMService:
                 
             return current_info
             
-        except (RateLimitError, APIStatusError) as e:
+        except _GROQ_RETRY_ERRORS as e:
             logger.error(f"Groq API error (will be retried by tenacity if attempts remaining): {e}")
             raise
         except Exception as e:

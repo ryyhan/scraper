@@ -221,15 +221,22 @@ def retry_groq() -> "retry":
     Return a ``tenacity`` retry decorator configured for the Groq SDK.
 
     Retries on:
-      * ``groq.RateLimitError``  — HTTP 429 rate limit exceeded
-      * ``groq.APIStatusError``  — HTTP 5xx server-side errors
+      * ``groq.RateLimitError``      — HTTP 429 rate limit exceeded
+      * ``groq.APIStatusError``      — HTTP 5xx server-side errors
+      * ``groq.APITimeoutError``     — request timed out
+      * ``groq.APIConnectionError``  — transient network failure
 
     Falls back to catching all ``Exception`` if the groq package is not
     installed (defensive import).
     """
     try:
-        from groq import APIStatusError, RateLimitError
-        exc_types = (RateLimitError, APIStatusError)
+        from groq import (
+            APIConnectionError,
+            APIStatusError,
+            APITimeoutError,
+            RateLimitError,
+        )
+        exc_types = (RateLimitError, APIStatusError, APITimeoutError, APIConnectionError)
     except ImportError:
         exc_types = (Exception,)
 
