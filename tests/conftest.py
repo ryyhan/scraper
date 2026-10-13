@@ -28,12 +28,23 @@ test_engine = create_engine(
 )
 
 
+import app.api.deps as api_deps
+api_deps.engine = test_engine
+
+
 @pytest.fixture(autouse=True)
 def setup_test_db():
     """Create all tables before each test and drop after."""
     SQLModel.metadata.create_all(test_engine)
     yield
     SQLModel.metadata.drop_all(test_engine)
+
+
+@pytest.fixture
+def db_session():
+    """Provide a direct DB session connected to test_engine."""
+    with Session(test_engine) as session:
+        yield session
 
 
 @pytest_asyncio.fixture(autouse=True)

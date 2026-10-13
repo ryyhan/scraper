@@ -115,8 +115,6 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                 await asyncio.wait_for(_run_scrape(), timeout=timeout_seconds)
             except asyncio.TimeoutError:
                 logger.warning(f"Task {task_id}: Reached payload timeout of {timeout_seconds}s.")
-                message = f"Task reached timeout limit ({timeout_seconds}s). Returning partial data."
-                status = "SUCCESS"
                 
                 if final_result.poe_info is None and combined_text:
                     import re
@@ -139,6 +137,22 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                             Email=valid_emails,
                             Address=[]
                         )
+                
+                has_contacts = (
+                    final_result.poe_info is not None
+                    and (
+                        bool(final_result.poe_info.Email)
+                        or bool(final_result.poe_info.Phone)
+                        or bool(final_result.poe_info.Fax)
+                        or bool(final_result.poe_info.Address)
+                    )
+                )
+                if has_contacts:
+                    status = "SUCCESS"
+                    message = f"Task reached timeout limit ({timeout_seconds}s). Returning partial data."
+                else:
+                    status = "FAILURE"
+                    message = f"[Scraper] Task reached timeout limit ({timeout_seconds}s) before contact data could be retrieved."
                 
         except Exception as e:
             logger.error(f"Task {task_id}: Error during processing: {e}")

@@ -2,6 +2,7 @@
 Integration tests for FastAPI endpoints in app.api.routes.
 """
 
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
 from app.models import CompanyMatchResult, ScrapeResult, ContactInfo, TaskRecord
@@ -101,3 +102,26 @@ async def test_failed_tasks_empty_list(client):
     response = await client.get("/google-search/failed/")
     assert response.status_code == 200
     assert response.json() == {"failed_tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_scraping_task_timeout_status_failure(db_session):
+    """Verify that a scraping task timing out with no contacts is marked as FAILURE."""
+    from app.api.routes import process_scraping_task
+    from app.models import SearchRequest, TaskRecord
+    from unittest.mock import patch
+
+    task_id = "test-timeout-no-contacts"
+    db_session.add(TaskRecord(task_id=task_id, status="IN_PROGRESS"))
+    db_session.commit()
+
+    req = SearchRequest(poe_name="Timeout Corp", timeout=10)
+
+    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        await process_scraping_task(task_id, req, webhook_url=None)
+
+    db_session.expire_all()
+    task = db_session.get(TaskRecord, task_id)
+    assert task is not None
+    assert task.status == "FAILURE"
+    assert "timeout limit" in task.message.lower()
