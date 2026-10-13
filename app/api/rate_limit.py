@@ -54,6 +54,12 @@ RATE_LIMIT_REQUESTS: int = 15
 #: Duration of the sliding window in seconds.
 RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 
+#: Interval in seconds between automatic background purges of idle client entries.
+CLEANUP_INTERVAL_SECONDS: float = 60.0
+
+#: Hard ceiling on distinct client IP entries in memory to prevent memory exhaustion.
+MAX_STORE_SIZE: int = 10000
+
 
 # ---------------------------------------------------------------------------
 # Internal state  (module-level singletons, lives for the process lifetime)
@@ -67,6 +73,66 @@ _store: Dict[str, Tuple[asyncio.Lock, Deque[float]]] = {}
 # Guards mutations to _store itself (not to individual client deques, which
 # are protected by the per-client lock).
 _store_lock: asyncio.Lock = asyncio.Lock()
+
+# Monotonic timestamp of the last executed purge sweep.
+_last_cleanup: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Memory management & eviction
+# ---------------------------------------------------------------------------
+
+async def purge_expired_clients(max_idle_seconds: float = RATE_LIMIT_WINDOW_SECONDS) -> int:
+    """
+    Remove client entries from ``_store`` whose last request is older than *max_idle_seconds*.
+
+    Also enforces the ``MAX_STORE_SIZE`` ceiling by evicting the oldest idle
+    records if capacity is exceeded.
+
+    Returns:
+        The total number of evicted client entries.
+    """
+    global _last_cleanup
+    now = time.monotonic()
+    cutoff = now - max_idle_seconds
+    evicted = 0
+
+    async with _store_lock:
+        to_delete = []
+        for client_ip, (lock, timestamps) in _store.items():
+            # If the client lock is currently held, a request is active; skip it.
+            if lock.locked():
+                continue
+            if not timestamps or timestamps[-1] < cutoff:
+                to_delete.append(client_ip)
+
+        for client_ip in to_delete:
+            del _store[client_ip]
+            evicted += 1
+
+        # Enforce MAX_STORE_SIZE ceiling: if still oversized, drop oldest entries
+        if len(_store) > MAX_STORE_SIZE:
+            sorted_by_activity = sorted(
+                _store.items(),
+                key=lambda item: item[1][1][-1] if item[1][1] else 0.0,
+            )
+            overflow = len(_store) - MAX_STORE_SIZE
+            for client_ip, (lock, _) in sorted_by_activity[:overflow]:
+                if not lock.locked() and client_ip in _store:
+                    del _store[client_ip]
+                    evicted += 1
+
+        _last_cleanup = now
+
+    return evicted
+
+
+async def reset_rate_limit_store() -> None:
+    """Clear all rate limit entries from memory (useful for testing)."""
+    global _last_cleanup
+    async with _store_lock:
+        _store.clear()
+        _last_cleanup = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +157,13 @@ async def _check_rate_limit(ip: str) -> None:
     Raises ``HTTP 429`` if the client has exceeded ``RATE_LIMIT_REQUESTS``
     within the last ``RATE_LIMIT_WINDOW_SECONDS`` seconds.
     """
+    global _last_cleanup
+    now = time.monotonic()
+
+    # Periodic memory eviction sweep
+    if (now - _last_cleanup >= CLEANUP_INTERVAL_SECONDS) or (len(_store) >= MAX_STORE_SIZE):
+        await purge_expired_clients()
+
     lock, timestamps = await _get_or_create_client_state(ip)
 
     async with lock:
