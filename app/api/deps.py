@@ -15,6 +15,7 @@ SQLite is configured with:
 
 from sqlmodel import Session, create_engine
 from sqlalchemy import event, text
+from sqlalchemy.pool import QueuePool
 from loguru import logger
 from app.core.config import settings
 
@@ -37,12 +38,12 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record):
     cursor.close()
 
 
-# StaticPool is intentionally NOT used here: we want a real connection pool so
-# that background tasks running in separate threads each get their own connection
-# (required by SQLite's threading model) rather than sharing a single in-memory one.
+# QueuePool provides a real connection pool so that background tasks running
+# in separate threads each get their own connection rather than sharing a single one.
 engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False},
+    poolclass=QueuePool,
     # SQLite doesn't benefit from a large pool; 5 + 10 overflow covers all
     # concurrent background tasks without opening too many file handles.
     pool_size=5,

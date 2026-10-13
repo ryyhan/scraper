@@ -92,6 +92,15 @@ def _norm_tag(s: str) -> str:
     return re.sub(r"[^a-z]", "", s.lower())
 
 
+# Common acronyms mapped to their canonical ContactTag
+_TAG_ABBREVIATIONS: dict[str, ContactTag] = {
+    "hr": ContactTag.HUMAN_RESOURCE,
+    "it": ContactTag.IT,
+    "pr": ContactTag.PR,
+    "hq": ContactTag.HEADQUARTERS,
+}
+
+
 def _resolve_contact_tag(raw: Any) -> ContactTag:
     """
     Fuzzy resolver for ContactTag that survives LLM label drift.
@@ -103,8 +112,7 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
       4. Normalised match – strip all non-alpha chars, lowercase, compare
          against normalised enum values AND enum keys
          (e.g. "HumanResources", "HUMANRESOURCES", "human_resource").
-      5. Short-abbreviation prefix match (input ≤ 4 chars only, e.g. "HR", "IT").
-         The length guard prevents broad false matches like "itmanager" → IT.
+      5. Acronym & short-abbreviation match (e.g. "HR", "HQ", "IT").
       6. Fall back to ContactTag.OTHERS and log a warning.
     """
     if isinstance(raw, ContactTag):
@@ -127,14 +135,21 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
         if member.value.lower() == lower:
             return member
 
-    # Step 4 – normalised match (keep letters only, lowercase)
+    # Step 4 – normalised match (keep letters only, lowercase, handle singular/plural 's')
     norm_input = _norm_tag(stripped)
+    norm_input_stem = norm_input.rstrip("s")
     for member in ContactTag:
-        if _norm_tag(member.value) == norm_input or _norm_tag(member.name) == norm_input:
+        val_norm = _norm_tag(member.value)
+        name_norm = _norm_tag(member.name)
+        if val_norm == norm_input or name_norm == norm_input:
+            return member
+        if val_norm.rstrip("s") == norm_input_stem or name_norm.rstrip("s") == norm_input_stem:
             return member
 
-    # Step 5 – short abbreviation prefix match only (≤ 4 chars, e.g. "HR", "IT").
-    # The length guard prevents false positives like "itmanager" → IT.
+    # Step 5 – acronym & short abbreviation match
+    if norm_input in _TAG_ABBREVIATIONS:
+        return _TAG_ABBREVIATIONS[norm_input]
+
     if len(norm_input) <= 4:
         for member in ContactTag:
             if _norm_tag(member.value).startswith(norm_input):
@@ -223,18 +238,18 @@ class TaggedContact(BaseModel):
         stripped = v.strip()
         lower = stripped.lower()
 
-        # --- Not an email (phone/fax/etc.) — skip all email checks ---
+        # --- Step 1: Block known Cloudflare obfuscation placeholders (e.g. "[email protected]") ---
+        if lower in _BLOCKED_EMAILS or any(b in lower for b in _BLOCKED_EMAILS):
+            raise ValueError(f"Blocked placeholder email: {v!r}")
+
+        # --- Not an email (phone/fax/etc.) — skip remaining email checks ---
         if "@" not in lower:
             return stripped
 
-        # --- Step 1: Must be a valid email address format ---
+        # --- Step 2: Must be a valid email address format ---
         # Rejects hallucinations like "contact form on website" or "name@...com"
         if not _EMAIL_REGEX.match(stripped):
             raise ValueError(f"Not a valid email address format: {v!r}")
-
-        # --- Step 2: Block known Cloudflare obfuscation placeholders ---
-        if lower in _BLOCKED_EMAILS:
-            raise ValueError(f"Blocked placeholder email: {v!r}")
 
         # --- Step 3: Block known bad domains ---
         for domain in _BLOCKED_EMAIL_DOMAINS:

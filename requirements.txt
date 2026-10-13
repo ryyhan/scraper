@@ -15,3 +15,5 @@ loguru==0.7.3
 tenacity==9.1.4
 pypdfium2==5.9.0
 python-multipart==0.0.30
+pytest>=8.0.0
+pytest-asyncio>=1.4.0
