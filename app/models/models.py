@@ -197,6 +197,89 @@ _EMAIL_REGEX = re.compile(
     r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$"  # one or more .label segments
 )
 
+# ---------------------------------------------------------------------------
+# EIN / FEIN (Employer Identification Number) Validation & Normalization
+# ---------------------------------------------------------------------------
+
+_VALID_IRS_PREFIXES: frozenset[str] = frozenset({
+    "01", "02", "03", "04", "05", "06",
+    "10", "11", "12", "13", "14", "15", "16",
+    "20", "21", "22", "23", "24", "25", "26", "27",
+    "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
+    "40", "41", "42", "43", "44", "45", "46", "47", "48",
+    "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
+    "60", "61", "62", "63", "64", "65", "66", "67", "68",
+    "71", "72", "73", "74", "75", "76", "77",
+    "80", "81", "82", "83", "84", "85", "86", "87", "88",
+    "90", "91", "92", "93", "94", "95",
+    "98", "99",
+})
+
+_INVALID_EIN_PATTERNS: frozenset[str] = frozenset({
+    "000000000",
+    "111111111",
+    "222222222",
+    "333333333",
+    "444444444",
+    "555555555",
+    "666666666",
+    "777777777",
+    "888888888",
+    "999999999",
+    "123456789",
+    "987654321",
+})
+
+
+def validate_and_normalize_ein(v: Any) -> Optional[str]:
+    """Validate and normalise an EIN/FEIN string into 'XX-XXXXXXX' or None.
+
+    Accepts:
+      - 'XX-XXXXXXX' (e.g. '12-3456780')
+      - Raw 9 digits 'XXXXXXXXX' (e.g. '123456780' -> normalises to '12-3456780')
+
+    Rejects:
+      - Non-string or empty / whitespace / placeholder strings ('N/A', 'None', etc.)
+      - Social Security Number formatting ('XXX-XX-XXXX')
+      - Strings that do not contain exactly 9 numeric digits
+      - Repetitive or sequential dummy patterns ('00-0000000', '12-3456789')
+      - Invalid IRS campus two-digit prefixes (e.g. '00', '07', '96')
+    """
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        return None
+
+    stripped = v.strip()
+    if not stripped:
+        return None
+
+    lower = stripped.lower()
+    if lower in ("none", "n/a", "na", "null", "not_found", "not found", "unknown", "undefined"):
+        return None
+
+    # Reject SSN format (3-2-4 digits) to prevent accidental SSN misclassification
+    if re.match(r"^\d{3}-\d{2}-\d{4}$", stripped):
+        logger.debug(f"[EIN] Rejected value matching SSN format rather than EIN: {stripped!r}")
+        return None
+
+    digits = re.sub(r"[^0-9]", "", stripped)
+    if len(digits) != 9:
+        logger.debug(f"[EIN] Rejected non-9-digit EIN candidate: {stripped!r}")
+        return None
+
+    if digits in _INVALID_EIN_PATTERNS or len(set(digits)) == 1:
+        logger.debug(f"[EIN] Rejected dummy/placeholder EIN sequence: {stripped!r}")
+        return None
+
+    prefix = digits[:2]
+    if prefix not in _VALID_IRS_PREFIXES:
+        logger.debug(f"[EIN] Rejected EIN with unassigned IRS campus prefix: {prefix!r} ({stripped!r})")
+        return None
+
+    return f"{prefix}-{digits[2:]}"
+
+
 
 def _filter_tagged_contacts(v: Any) -> list:
     """List-level validator: try to build each TaggedContact and silently drop invalid items.
@@ -347,6 +430,15 @@ class ContactInfo(BaseModel):
     Email: List[str] = Field(default_factory=list)
     Address: List[str] = Field(default_factory=list)
     DeptContacts: Optional[Dict[str, Any]] = None
+    EIN: Optional[str] = Field(
+        default=None,
+        description="Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' if verified, otherwise null.",
+    )
+
+    @field_validator("EIN", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
     @field_validator('Phone', 'Fax', mode='before')
     @classmethod
@@ -398,7 +490,16 @@ class ContactInfo(BaseModel):
 class ScrapeResult(BaseModel):
     poe_name: str
     official_site: str
+    ein: Optional[str] = Field(
+        default=None,
+        description="Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' if verified, otherwise null.",
+    )
     poe_info: Optional[ContactInfo] = None
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
 
 # --- OpenAI Search Models ---
@@ -456,11 +557,23 @@ class OpenAISearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
+        ),
+    )
     company_info: OpenAICompanyInfo = Field(default_factory=OpenAICompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Token consumption breakdown for this pipeline run (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
 
 # --- Gemini Search Models ---
@@ -517,11 +630,23 @@ class GeminiSearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
+        ),
+    )
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Token consumption breakdown for this pipeline run (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
 
 # --- VOE (Verification of Employment) Models ---
@@ -767,6 +892,13 @@ class CombinedSearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records, otherwise null."
+        ),
+    )
     company_info: CombinedCompanyInfo = Field(default_factory=CombinedCompanyInfo)
     summary: CombinedSearchSummary = Field(default_factory=CombinedSearchSummary)
     openai_result: Optional[OpenAISearchResult] = None
@@ -775,6 +907,11 @@ class CombinedSearchResult(BaseModel):
         default=None,
         description="Aggregated token consumption from both providers (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
 
 # --- External Webhook Payload Model ---

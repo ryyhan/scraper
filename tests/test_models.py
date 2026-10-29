@@ -147,3 +147,77 @@ def test_company_info_address_sanitization():
 
     gemini_info = GeminiCompanyInfo(addresses=raw_addresses)
     assert len(gemini_info.addresses) == 2
+
+
+def test_validate_and_normalize_ein():
+    """Verify EIN/FEIN validation, normalisation, and dummy/SSN rejection."""
+    from app.models import validate_and_normalize_ein
+
+    # Valid standard formatted EIN (prefix 12 is valid IRS campus, non-dummy sequence)
+    assert validate_and_normalize_ein("12-3456780") == "12-3456780"
+    assert validate_and_normalize_ein("54-1234567") == "54-1234567"
+    assert validate_and_normalize_ein("  20-9876543  ") == "20-9876543"
+
+    # Raw 9 digits normalised to XX-XXXXXXX
+    assert validate_and_normalize_ein("123456780") == "12-3456780"
+    assert validate_and_normalize_ein("541234567") == "54-1234567"
+
+    # SSN format (3-2-4) strictly rejected
+    assert validate_and_normalize_ein("123-45-6789") is None
+    assert validate_and_normalize_ein("987-65-4321") is None
+
+    # Dummy/placeholder patterns rejected
+    assert validate_and_normalize_ein("00-0000000") is None
+    assert validate_and_normalize_ein("12-3456789") is None
+    assert validate_and_normalize_ein("11-1111111") is None
+    assert validate_and_normalize_ein("99-9999999") is None
+
+    # Invalid / unassigned IRS prefixes rejected
+    assert validate_and_normalize_ein("00-1234567") is None
+    assert validate_and_normalize_ein("07-1234567") is None
+    assert validate_and_normalize_ein("96-1234567") is None
+
+    # Non-digits or wrong length rejected
+    assert validate_and_normalize_ein("12-3456") is None
+    assert validate_and_normalize_ein("12-345678901") is None
+    assert validate_and_normalize_ein("12-ABCDEFG") is None
+
+    # Null / empty / placeholder strings coerced to None
+    assert validate_and_normalize_ein(None) is None
+    assert validate_and_normalize_ein("") is None
+    assert validate_and_normalize_ein("   ") is None
+    assert validate_and_normalize_ein("N/A") is None
+    assert validate_and_normalize_ein("None") is None
+    assert validate_and_normalize_ein("not_found") is None
+
+
+def test_ein_on_search_result_models():
+    """Verify that all POE search result models accept and validate the ein field."""
+    from app.models import (
+        ScrapeResult,
+        OpenAISearchResult,
+        GeminiSearchResult,
+        CombinedSearchResult,
+        ContactInfo,
+    )
+
+    # ScrapeResult
+    sr1 = ScrapeResult(poe_name="Acme", official_site="https://acme.com", ein="12-3456780")
+    assert sr1.ein == "12-3456780"
+
+    # OpenAISearchResult with raw digits
+    oai1 = OpenAISearchResult(company_name="Acme", ein="541234567")
+    assert oai1.ein == "54-1234567"
+
+    # GeminiSearchResult with invalid EIN coerces to None
+    gem1 = GeminiSearchResult(company_name="Acme", ein="invalid-ein-placeholder")
+    assert gem1.ein is None
+
+    # CombinedSearchResult with valid EIN
+    comb1 = CombinedSearchResult(company_name="Acme", ein="20-9876543")
+    assert comb1.ein == "20-9876543"
+
+    # ContactInfo with EIN
+    ci = ContactInfo(EIN="12-3456780")
+    assert ci.EIN == "12-3456780"
+

@@ -69,6 +69,7 @@ class LLMService:
         - "Email": Array of email addresses (list of strings)
         - "Address": Array of full physical street addresses (list of strings, e.g., ["123 Main St, City, State 12345"])
         - "DeptContacts": A dictionary of specific department contacts if available (e.g. {{"Sales": "123-456"}})
+        - "EIN": Company's 9-digit Federal Employer Identification Number in format XX-XXXXXXX, or null if not found.
 
         If a field is not found, use an empty array or null (or empty object for DeptContacts).
         Ensure the output is strictly valid JSON.
@@ -93,7 +94,8 @@ class LLMService:
                 Fax=data.get("Fax", []),
                 Email=data.get("Email", []),
                 Address=data.get("Address", []),
-                DeptContacts=data.get("DeptContacts", {})
+                DeptContacts=data.get("DeptContacts", {}),
+                EIN=data.get("EIN"),
             )
             
         except json.JSONDecodeError:

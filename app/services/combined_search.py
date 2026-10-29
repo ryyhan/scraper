@@ -354,10 +354,29 @@ class CombinedSearchService:
                 f"{company_name!r} → {resolved_official_name!r}"
             )
 
+        # --- Resolve EIN/FEIN (prefer agreement, or whichever provider found a verified EIN) ---
+        resolved_ein: Optional[str] = None
+        oai_ein = openai_result.ein if openai_result and openai_result.ein else None
+        gem_ein = gemini_result.ein if gemini_result and gemini_result.ein else None
+        if oai_ein and gem_ein:
+            if oai_ein == gem_ein:
+                resolved_ein = oai_ein
+            else:
+                logger.warning(
+                    f"[CombinedSearchService] Provider EIN mismatch for {company_name!r}: "
+                    f"OpenAI={oai_ein!r} vs Gemini={gem_ein!r}. Defaulting to OpenAI verified EIN."
+                )
+                resolved_ein = oai_ein
+        elif oai_ein:
+            resolved_ein = oai_ein
+        elif gem_ein:
+            resolved_ein = gem_ein
+
         return CombinedSearchResult(
             company_name=company_name,
             official_company_name=resolved_official_name,
             official_site=official_site,
+            ein=resolved_ein,
             company_info=company_info,
             summary=summary,
             openai_result=openai_result,

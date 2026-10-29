@@ -13,7 +13,7 @@ from loguru import logger
 from playwright_stealth import Stealth
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.core.config import settings
-from app.models.models import _EMAIL_REGEX  # reuse the authoritative validator
+from app.models.models import _EMAIL_REGEX, validate_and_normalize_ein
 
 
 class BrowserPool:
@@ -460,6 +460,21 @@ class ScraperService:
                 logger.info(f"Regex found {len(valid_emails)} hidden emails in raw HTML on {url}")
                 # Append them forcefully to the bottom of the visible text so the LLM is guaranteed to see them
                 text += "\n\n--- HIDDEN EMAILS FOUND IN RAW HTML SOURCE ---\n" + "\n".join(valid_emails)
+
+            # Aggressively hunt for EIN/FEIN in raw HTML source (footers, legal disclosures)
+            ein_raw_matches = re.findall(
+                r'(?:EIN|FEIN|Tax\s*ID|Employer\s*ID|IRS\s*#?)[\s:#]*([0-9]{2}-[0-9]{7})\b',
+                html_content,
+                re.IGNORECASE,
+            )
+            valid_eins = [
+                validate_and_normalize_ein(e)
+                for e in set(ein_raw_matches)
+                if validate_and_normalize_ein(e)
+            ]
+            if valid_eins:
+                logger.info(f"Regex found {len(valid_eins)} possible EIN/FEIN in raw HTML on {url}")
+                text += "\n\n--- POSSIBLE EIN/FEIN FOUND IN RAW HTML SOURCE ---\n" + "\n".join(valid_eins)
                 
             text = " ".join(text.split())
         except Exception as e:

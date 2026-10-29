@@ -35,4 +35,5 @@ from .models import (
     TokenUsage,
     CompanyMatchRequest,
     CompanyMatchResult,
+    validate_and_normalize_ein,
 )

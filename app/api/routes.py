@@ -134,6 +134,8 @@ async def process_scraping_task(task_id: str, request: SearchRequest, webhook_ur
                     contact_info = await llm_client.extract_contact_info(combined_text)
                     if contact_info:
                         final_result.poe_info = contact_info
+                        if contact_info.EIN:
+                            final_result.ein = contact_info.EIN
                     
                     # 6. Fallback Search for missing email
                     if final_result.poe_info and not final_result.poe_info.Email:

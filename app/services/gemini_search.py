@@ -570,13 +570,15 @@ class GeminiSearchService:
             f"  n) '{company_name} fax number' site:bbb.org\n"
             f"  o) '{company_name}' site:yellowpages.com OR site:manta.com phone fax\n"
             f"  p) '{company_name}' annual report OR corporate directory contact phone\n"
+            f"  q) '{company_name}' (\"EIN\" OR \"FEIN\" OR \"Employer Identification Number\" OR \"tax ID\" OR site:sec.gov OR \"Form 990\")\n"
             "Do NOT stop after the first query. Execute all of the above.\n\n"
             "GOALS:\n"
             "1. Find fax numbers — these are especially likely to appear in BBB listings and PDF documents.\n"
             "2. Find phone numbers for HR, Payroll, and Admin departments.\n"
             "3. Find email addresses in PDF press releases or corporate documents.\n"
             "4. Find physical addresses from business directory listings.\n"
-            "5. Extract ALL contact details visible in any PDF documents you can access.\n\n"
+            "5. Extract ALL contact details visible in any PDF documents you can access.\n"
+            "6. Identify the company's 9-digit Federal Employer Identification Number (EIN/FEIN) from official filings or public records if available.\n\n"
             "Report ALL contact information found with its source context."
         )
 
@@ -672,7 +674,11 @@ class GeminiSearchService:
             "If no company-owned official URL was found in the research, leave this as an empty string.\n"
             "6. Return ONLY the extracted data values — do NOT return the schema itself.\n"
             "7. If a field has no data, use an empty array [] or empty string \"\".\n"
-            "8. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "8. Fill 'ein' with the company's 9-digit Federal Employer Identification Number (FEIN/EIN) "
+            "formatted strictly as 'XX-XXXXXXX' (two digits, hyphen, seven digits). "
+            "Look in official filings, SEC EDGAR reports, IRS Form 990, corporate registrations, "
+            "or public tax documents. If not found or uncertain, set 'ein' to null. NEVER invent or guess an EIN.\n"
+            "9. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -803,7 +809,8 @@ class GeminiSearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' fields unchanged.\n\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', 'official_site', and 'ein' fields unchanged "
+            "(or set 'ein' to null if its 9 digits are not found in RAW RESEARCH TEXT).\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
             f"EXTRACTED CONTACTS:\n{extracted_json}\n\n"
             "Return the filtered result in exactly the same JSON schema."
@@ -832,6 +839,15 @@ class GeminiSearchService:
 
         if response.parsed is not None:
             verified = response.parsed  # type: ignore[assignment]
+            if hasattr(verified, "ein") and verified.ein:
+                ein_digits = re.sub(r"[^0-9]", "", verified.ein)
+                clean_research = re.sub(r"[^0-9]", "", research_text)
+                if len(ein_digits) != 9 or ein_digits not in clean_research:
+                    logger.warning(
+                        f"[GeminiSearchService] Step 3: removing unverified EIN {verified.ein!r} "
+                        f"not found in raw research text for {company_name!r}"
+                    )
+                    verified.ein = None
             logger.debug(
                 "[GeminiSearchService] Step 3: verification complete via SDK-parsed object"
             )
@@ -843,7 +859,13 @@ class GeminiSearchService:
         )
         raw_json_text = self._strip_markdown_fences(response.text or "{}")
         data = json.loads(raw_json_text)
-        return model_class.model_validate(data), step_usage
+        fallback_verified = model_class.model_validate(data)
+        if hasattr(fallback_verified, "ein") and fallback_verified.ein:
+            ein_digits = re.sub(r"[^0-9]", "", fallback_verified.ein)
+            clean_research = re.sub(r"[^0-9]", "", research_text)
+            if len(ein_digits) != 9 or ein_digits not in clean_research:
+                fallback_verified.ein = None
+        return fallback_verified, step_usage
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:
