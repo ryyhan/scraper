@@ -17,8 +17,23 @@ from app.api.deps import engine
 from app.api.routes import router as api_router
 from app.services.scraper import BrowserPool
 
+from sqlalchemy import text
+
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
+    # Lightweight auto-migration for existing databases
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text("PRAGMA table_info(taskrecord)"))
+            columns = [row[1] for row in result.fetchall()]
+            if columns and "task_type" not in columns:
+                logger.info("Auto-migrating taskrecord table: adding 'task_type' column...")
+                conn.execute(text("ALTER TABLE taskrecord ADD COLUMN task_type VARCHAR DEFAULT 'general'"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_taskrecord_task_type ON taskrecord (task_type)"))
+                conn.commit()
+                logger.info("Auto-migration complete: 'task_type' column added.")
+        except Exception as e:
+            logger.warning(f"Auto-migration check encountered an issue: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

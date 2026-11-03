@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any, Coroutine, Set
 from loguru import logger
 from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, UploadFile, File, Form
@@ -33,6 +33,43 @@ from app.core.config import settings
 
 router = APIRouter()
 BROWSER_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_BROWSERS)
+COMBINED_SEARCH_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_COMBINED_SEARCHES)
+
+# Strong module-level references to background asyncio tasks to prevent garbage collection
+_background_tasks: Set[asyncio.Task[Any]] = set()
+
+
+def _spawn_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """
+    Spawn a background asyncio task decoupled from the ASGI request lifecycle.
+    Keeps a strong reference in _background_tasks to prevent garbage collection.
+    """
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+def _create_task_record_sync(
+    task_id: str,
+    task_type: str,
+    status: str = "IN_PROGRESS",
+) -> None:
+    """Create and persist an initial TaskRecord row synchronously in a thread."""
+    from app.api.deps import engine
+    with Session(engine) as session:
+        task_record = TaskRecord(task_id=task_id, task_type=task_type, status=status)
+        session.add(task_record)
+        session.commit()
+
+
+async def _create_task_record(
+    task_id: str,
+    task_type: str,
+    status: str = "IN_PROGRESS",
+) -> None:
+    """Safely insert a new task record in a worker thread to prevent event-loop blocking."""
+    await asyncio.to_thread(_create_task_record_sync, task_id, task_type, status)
 
 
 def _persist_task_record_sync(
@@ -874,41 +911,43 @@ async def _process_combined_search_task(task_id: str, request: CombinedSearchReq
     then persists the result to the shared TaskRecord table.
     """
     logger.info(
-        f"[combined-search] Task {task_id}: starting for company={request.company_name!r}"
+        f"[combined-search] Task {task_id}: waiting for search slot (company={request.company_name!r})"
     )
+    async with COMBINED_SEARCH_SEMAPHORE:
+        logger.info(
+            f"[combined-search] Task {task_id}: acquired slot, starting search for company={request.company_name!r}"
+        )
 
-    status = "FAILURE"
-    message = "Unknown error"
-    result_data: dict = {"company_name": request.company_name}
+        status = "FAILURE"
+        message = "Unknown error"
+        result_data: dict = {"company_name": request.company_name}
 
-    try:
-        service = CombinedSearchService()
-        result: CombinedSearchResult = await service.search(request)
+        try:
+            service = CombinedSearchService()
+            result: CombinedSearchResult = await service.search(request)
 
-        status = "SUCCESS"
-        message = "Successfully extracted contact info via combined search"
-        result_data = result.model_dump()
-        logger.info(f"[combined-search] Task {task_id}: completed successfully")
+            status = "SUCCESS"
+            message = "Successfully extracted contact info via combined search"
+            result_data = result.model_dump()
+            logger.info(f"[combined-search] Task {task_id}: completed successfully")
 
-    except Exception as exc:
-        message = f"Combined search error: {exc}"
-        logger.error(f"[combined-search] Task {task_id}: failed – {exc}")
+        except Exception as exc:
+            message = f"Combined search error: {exc}"
+            logger.error(f"[combined-search] Task {task_id}: failed – {exc}")
 
-    # Persist outcome to the shared TaskRecord table
-    await _persist_task_record(
-        task_id=task_id,
-        status=status,
-        message=message,
-        result_data=result_data,
-        task_type="combined-search",
-    )
+        # Persist outcome to the shared TaskRecord table
+        await _persist_task_record(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result_data=result_data,
+            task_type="combined-search",
+        )
 
 
 @router.post("/combined-search/", summary="Search company contact info via combined OpenAI and Gemini")
 async def create_combined_search_task(
     request: CombinedSearchRequest,
-    background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session),
     _rl: None = Depends(task_rate_limit),
 ):
     """
@@ -919,15 +958,8 @@ async def create_combined_search_task(
     Returns a *task_id* that can be polled via **GET /combined-search/{task_id}**.
     """
     task_id = str(uuid.uuid4())
-    task_record = TaskRecord(task_id=task_id, task_type="combined-search", status="IN_PROGRESS")
-    session.add(task_record)
-    session.commit()
-
-    background_tasks.add_task(
-        _process_combined_search_task,
-        task_id,
-        request,
-    )
+    await _create_task_record(task_id=task_id, task_type="combined-search", status="IN_PROGRESS")
+    _spawn_background_task(_process_combined_search_task(task_id, request))
 
     return {"task_id": task_id, "status": "IN_PROGRESS"}
 

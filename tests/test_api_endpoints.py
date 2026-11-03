@@ -157,3 +157,65 @@ async def test_failed_tasks_filtered_by_task_type(client, db_session):
     gemini_ids = [t["task_id"] for t in res_gemini.json()["failed_tasks"]]
     assert "t-gemini" in gemini_ids
     assert "t-openai" not in gemini_ids
+
+
+@pytest.mark.asyncio
+async def test_combined_search_instant_task_creation(client, db_session):
+    """Verify /combined-search/ immediately returns task_id and persists IN_PROGRESS record."""
+    from unittest.mock import patch, AsyncMock
+    from app.models import CombinedSearchResult, CombinedCompanyInfo, CombinedSearchSummary
+
+    dummy_result = CombinedSearchResult(
+        company_name="Acme Corp",
+        official_company_name="Acme Corporation",
+        official_site="https://acme.com",
+        company_info=CombinedCompanyInfo(),
+        summary=CombinedSearchSummary(),
+    )
+
+    with patch("app.services.CombinedSearchService.search", new=AsyncMock(return_value=dummy_result)):
+        response = await client.post("/combined-search/", json={"company_name": "Acme Corp"})
+        assert response.status_code == 200
+        data = response.json()
+        assert "task_id" in data
+        assert data["status"] == "IN_PROGRESS"
+
+        task_id = data["task_id"]
+        # Allow the event loop a brief moment to process the detached task
+        await asyncio.sleep(0.05)
+
+        task = db_session.get(TaskRecord, task_id)
+        assert task is not None
+        assert task.task_type == "combined-search"
+
+
+@pytest.mark.asyncio
+async def test_combined_search_concurrent_task_creation(client, db_session):
+    """Verify multiple concurrent requests to /combined-search/ return unique task_ids instantly."""
+    from unittest.mock import patch, AsyncMock
+    from app.models import CombinedSearchResult, CombinedCompanyInfo, CombinedSearchSummary
+
+    dummy_result = CombinedSearchResult(
+        company_name="Test Corp",
+        official_company_name="Test Corp",
+        official_site="https://test.com",
+        company_info=CombinedCompanyInfo(),
+        summary=CombinedSearchSummary(),
+    )
+
+    with patch("app.services.CombinedSearchService.search", new=AsyncMock(return_value=dummy_result)):
+        tasks = [
+            client.post("/combined-search/", json={"company_name": f"Company {i}"})
+            for i in range(5)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+        task_ids = []
+        for r in responses:
+            assert r.status_code == 200
+            data = r.json()
+            assert data["status"] == "IN_PROGRESS"
+            task_ids.append(data["task_id"])
+
+        # All 5 task_ids must be unique
+        assert len(set(task_ids)) == 5
