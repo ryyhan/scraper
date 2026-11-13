@@ -1172,11 +1172,14 @@ async def parse_background_check(
     **Fields returned** (all fields default to `""` if not found):
     - `file_number` — Case / order / reference ID
     - `employee_name` — Full name of the subject / applicant
-    - `date_of_birth` — Subject's DOB (normalised to YYYY-MM-DD)
     - `requested_by` — Requester name or organisation
     - `employer_name` — Employer / client company
     - `report_date` — Report date (normalised to YYYY-MM-DD)
     - `status` — Overall status (e.g. Clear, Consider, Full Time Active, No Longer Employed)
+    - `phone_number` — Employer's phone number
+    - `fax_number` — Employer's fax number
+    - `department` — Department at the employer
+    - `submitted_by` — Name of the person who submitted the fax
 
     **Providers:**
     - `gemini` (default) — uses Gemini Files API + native JSON schema output.
@@ -1227,11 +1230,17 @@ async def parse_background_check(
     t0 = time.perf_counter()
 
     try:
-        fields_dict: dict = await asyncio.to_thread(
-            service.parse,
-            pdf_bytes,
-            filename,
-            provider,
+        fields_dict, page_count = await asyncio.wait_for(
+            asyncio.to_thread(service.parse, pdf_bytes, filename, provider),
+            timeout=300.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "PDF processing timed out after 300s. "
+                "Try a smaller document or switch providers."
+            ),
         )
     except RuntimeError as exc:
         # Missing API key or pypdfium2 not installed
@@ -1248,6 +1257,7 @@ async def parse_background_check(
     elapsed = round(time.perf_counter() - t0, 3)
     logger.info(
         f"[parse-background-check] Done: file={filename!r}, elapsed={elapsed}s, "
+        f"pages={page_count}, "
         f"employee={fields_dict.get('employee_name', '')!r}, "
         f"status={fields_dict.get('status', '')!r}"
     )
@@ -1256,6 +1266,7 @@ async def parse_background_check(
         filename=filename,
         provider=provider,
         processing_time_seconds=elapsed,
+        page_count=page_count,
         data=BgCheckFields(**fields_dict),
     )
 

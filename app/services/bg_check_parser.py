@@ -24,12 +24,14 @@ Fields extracted
 ~~~~~~~~~~~~~~~~
   file_number    – Case/order/reference ID on the report
   employee_name  – Full name of the subject / applicant
-  date_of_birth  – Subject's DOB, normalised to YYYY-MM-DD
-  requested_by   – Requester name or organisation
+  requested_by   – Full name of the person who submitted the request
   employer_name  – Employer / client company named on the report
-  position       – Job title or position applied for
   report_date    – Report generation / order date, normalised to YYYY-MM-DD
   status         – Overall report status (Clear, Consider, Adverse Action, …)
+  phone_number   – Employer's phone number
+  fax_number     – Employer's fax number
+  department     – Department at the employer named on the report
+  submitted_by   – Name of the person who submitted the fax
 
 Design decisions
 ~~~~~~~~~~~~~~~~
@@ -77,7 +79,7 @@ DOCUMENT TEXT:
 
 TASK:
 Extract the following fields from the document text above.
-Return a single, flat JSON object with EXACTLY these 6 keys.
+Return a single, flat JSON object with EXACTLY these 10 keys.
 
 FIELD DEFINITIONS AND LABEL SYNONYMS
 (look for any of the listed synonyms in the document):
@@ -93,30 +95,25 @@ FIELD DEFINITIONS AND LABEL SYNONYMS
    – Look for: "Applicant", "Subject", "Candidate", "Employee",
      "Employee Name", "Applicant Name", "Subject Name", "Name of Applicant".
 
-3. "date_of_birth"
-   – The subject's date of birth.
-   – Look for: "DOB", "Date of Birth", "Birth Date", "Date of Birth (DOB)".
-   – NORMALISE to ISO 8601 format: YYYY-MM-DD.
-     Examples: "November 15, 1985" → "1985-11-15", "11/15/1985" → "1985-11-15".
+3. "requested_by"
+   – The full name of the individual person who submitted or ordered this report.
+     Extract a person's name only — do NOT return a company or organisation name.
+   – Look for: "Requested By", "Ordered By", "Requestor", "Submitted By",
+     "Authorized By", "Completed By", "Prepared By", "Contact Name".
 
-4. "requested_by"
-   – The person or organisation who ordered / requested this report.
-   – Look for: "Requested By", "Ordered By", "Client", "Client Name",
-     "Requestor", "Employer/Client", "Account Name", "Organization".
-
-5. "employer_name"
+4. "employer_name"
    – The employer or company named on the report (may differ from requestor).
    – Look for: "Employer", "Company", "Employer Name", "Company Name",
      "Organization", "Hiring Company", "Client Company".
 
-6. "report_date"
+5. "report_date"
    – The date the report was generated, completed, or ordered.
    – Look for: "Report Date", "Date", "Order Date", "Ordered Date",
      "Completed Date", "Date Completed", "Date Ordered", "Ordered On",
      "Generated On", "Processed Date".
    – NORMALISE to ISO 8601 format: YYYY-MM-DD.
 
-7. "status"
+6. "status"
    – The overall result or adjudication status of the background check, OR
      an employment-status option that was visually selected on the form.
    – Look for: "Status", "Overall Status", "Result", "Summary Status",
@@ -213,6 +210,28 @@ Example 5 — employment status section present but nothing is marked:
   → status field value = "NA"
     (The section exists but no option was selected.)
 
+7. "phone_number"
+   – The employer's telephone / contact number.
+   – Look for: "Phone", "Phone Number", "Telephone", "Tel", "Tel.", "Phone #",
+     "Contact Number", "Employer Phone", "Business Phone", "Main Phone".
+   – Return the number exactly as it appears (e.g. "(555) 123-4567").
+
+8. "fax_number"
+   – The employer's fax number.
+   – Look for: "Fax", "Fax Number", "Facsimile", "Fax #", "Employer Fax",
+     "Business Fax".
+   – Return the number exactly as it appears.
+
+9. "department"
+   – The specific department at the employer named on the report.
+   – Look for: "Department", "Dept", "Dept.", "Division", "Business Unit",
+     "Department Name", "Work Department", "Section".
+
+10. "submitted_by"
+   – The name of the person who submitted the fax.
+   – Look for: "Submitted By", "Fax Submitted By", "Fax From", "Sent By",
+     "From", "Submitter", "Completed By", "Authorized By", "Signed By".
+
 RULES:
 - Return ONLY the JSON object — no explanation, no markdown fences.
 - If a field cannot be found anywhere in the document, return "" for that key.
@@ -224,11 +243,14 @@ REQUIRED OUTPUT FORMAT (example):
 {{
   "file_number": "BGC-2024-00123",
   "employee_name": "John Michael Doe",
-  "date_of_birth": "1985-04-22",
   "requested_by": "Acme Corp HR Department",
   "employer_name": "Acme Corporation",
   "report_date": "2024-11-15",
-  "status": "Full Time Active"
+  "status": "Full Time Active",
+  "phone_number": "(555) 123-4567",
+  "fax_number": "(555) 123-4568",
+  "department": "Human Resources",
+  "submitted_by": "Jane Smith"
 }}
 """
 
@@ -264,10 +286,9 @@ class BgCheckParserService:
         pdf_bytes: bytes,
         filename: str,
         provider: Literal["gemini", "openai"],
-    ) -> dict:
+    ) -> tuple[dict, int]:
         """
-        Run the full two-stage pipeline and return a plain dict matching
-        ``BgCheckFields``.
+        Run the full two-stage pipeline and return ``(fields_dict, page_count)``.
 
         Args:
             pdf_bytes: Raw PDF bytes (already validated by the caller).
@@ -275,8 +296,10 @@ class BgCheckParserService:
             provider:  ``"gemini"`` or ``"openai"``.
 
         Returns:
-            Dict with keys: file_number, employee_name, date_of_birth,
-            requested_by, employer_name, position, report_date, status.
+            A tuple of (dict, int) where the dict has keys: file_number,
+            employee_name, requested_by, employer_name, report_date, status,
+            phone_number, fax_number, department, submitted_by; and int is
+            the page count from Stage 1.
 
         Raises:
             RuntimeError: If a required API key is not configured.
@@ -310,7 +333,7 @@ class BgCheckParserService:
             f"status={fields.get('status', '')!r}"
         )
 
-        return fields
+        return fields, page_count
 
     # ── Stage 2 — Gemini path ───────────────────────────────────────────────
 

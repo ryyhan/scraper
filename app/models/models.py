@@ -950,13 +950,9 @@ class BgCheckFields(BaseModel):
         default="",
         description="Full name of the subject / applicant being screened.",
     )
-    date_of_birth: str = Field(
-        default="",
-        description="Subject's date of birth in YYYY-MM-DD format, or ''.",
-    )
     requested_by: str = Field(
         default="",
-        description="Name or organisation that ordered the background check.",
+        description="Name of the person who submitted the background check request.",
     )
     employer_name: str = Field(
         default="",
@@ -973,6 +969,22 @@ class BgCheckFields(BaseModel):
             "(e.g. 'Clear', 'Consider', 'Adverse Action')."
         ),
     )
+    phone_number: str = Field(
+        default="",
+        description="Employer's phone number as it appears on the report.",
+    )
+    fax_number: str = Field(
+        default="",
+        description="Employer's fax number as it appears on the report.",
+    )
+    department: str = Field(
+        default="",
+        description="Department at the employer named on the report.",
+    )
+    submitted_by: str = Field(
+        default="",
+        description="Name of the person who submitted the fax.",
+    )
 
 
 class BgCheckParseResult(BaseModel):
@@ -981,6 +993,10 @@ class BgCheckParseResult(BaseModel):
     provider: Literal["gemini", "openai"] = Field(description="LLM provider used.")
     processing_time_seconds: float = Field(
         description="Total wall-clock time for both pipeline stages."
+    )
+    page_count: int = Field(
+        default=0,
+        description="Number of pages detected in the uploaded PDF.",
     )
     data: BgCheckFields = Field(
         default_factory=BgCheckFields,

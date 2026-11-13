@@ -223,8 +223,6 @@ class PdfExtractorService:
             ValueError:   On validation failure (bad extension, size, magic bytes).
             RuntimeError: If the required API key is not configured.
         """
-        self.validate(pdf_bytes, filename)
-
         logger.info(
             f"[PdfExtractor] Starting extraction: file={filename!r}, "
             f"size={len(pdf_bytes) / 1024:.1f} KB, provider={provider!r}"
