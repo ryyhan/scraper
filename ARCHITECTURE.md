@@ -199,21 +199,7 @@ Total Call Ceiling:
     3 (tenacity) × 3 (1 initial + 2 SDK retries) = 9 maximum API calls per request
 ```
 
-### SQLite Concurrency (WAL Mode)
-SQLite is configured with production-grade pragmas on every connection:
-- `PRAGMA journal_mode=WAL;` — Readers do not block writers, writers do not block readers.
-- `PRAGMA busy_timeout=30000;` — Waits up to 30 seconds for lock release before raising `OperationalError`.
-- `PRAGMA synchronous=NORMAL;` — Optimal balance between disk I/O performance and crash durability.
-- Connection Pool: `pool_size=5`, `max_overflow=10`, `pool_recycle=1800` (recycles connections every 30 minutes), and `check_same_thread=False`.
+### SQLite Concurrency
+SQLite is configured with WAL journal mode, `busy_timeout=30 000 ms`, and `synchronous=NORMAL` — allowing concurrent reads during writes and tolerating short lock contention without raising `SQLITE_BUSY` errors.
 
-### Anti-Hallucination Triple-Pass Verification
-For grounded search endpoints (`/openai-search/` and `/gemini-search/`):
-1. **Gatherer**: Researches the live web and generates cited Markdown notes.
-2. **Extractor**: Converts cited findings into typed Pydantic models.
-3. **Verifier**: A dedicated LLM fact-checking pass cross-examines every extracted contact against the raw citations. Phone/fax numbers are normalized using digit-only comparison to prevent false positives from formatting differences.
-
-### Token Accounting
-A normalized `TokenUsage` object is calculated across pipelines:
-- Captures input tokens, output tokens, and total tokens.
-- Normalizes disparate SDK naming conventions (e.g., Gemini's `prompt_token_count` vs. OpenAI's `input_tokens`).
-- Combined endpoints report both provider-specific metrics and a consolidated `grand_total`.
+#### v1.0
