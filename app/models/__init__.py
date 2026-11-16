@@ -25,6 +25,7 @@ from .models import (
     SourceStats,
     CombinedSearchSummary,
     TaggedContact,
+    RegisteredAgent,
     ContactTag,
     StructuredAddress,
     HintAddress,

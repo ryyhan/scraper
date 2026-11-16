@@ -502,6 +502,77 @@ class ScrapeResult(BaseModel):
         return validate_and_normalize_ein(v)
 
 
+# --- Registered Agent ---
+
+_REGISTERED_AGENT_PLACEHOLDERS = frozenset({
+    "", "n/a", "na", "none", "null", "unknown", "not found", "not available",
+    "not_found", "not applicable", "tbd", "string",
+})
+
+
+class RegisteredAgent(BaseModel):
+    """
+    The company's Registered Agent as recorded with the state of formation.
+
+    States use different terms for the same role (Registered Agent, Resident
+    Agent, Statutory Agent, Agent for Service of Process, Commercial Clerk,
+    Registered Office Provider, National Registered Agent); ``designation``
+    preserves the term used by the source while ``name`` is always the agent's
+    name (an individual or a commercial agent company).
+    """
+    name: str = Field(description="Name of the registered agent (person or company).")
+    designation: Optional[str] = Field(
+        default=None,
+        description="Term used by the source for this role (e.g. 'Statutory Agent', 'Resident Agent').",
+    )
+    state: Optional[str] = Field(
+        default=None,
+        description="State / jurisdiction in which the agent is registered (e.g. 'DE', 'Texas').",
+    )
+    address: Optional[str] = Field(
+        default=None,
+        description="Single-line address of the registered agent, if listed.",
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        description="Phone number of the registered agent, if listed.",
+    )
+
+    @field_validator("name", "designation", "state", "address", "phone", mode="before")
+    @classmethod
+    def _clean_str(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = re.sub(r"\s+", " ", v).strip()
+        return v
+
+    @field_validator("designation", "state", "address", "phone")
+    @classmethod
+    def _empty_to_none(cls, v: Optional[str]) -> Optional[str]:
+        return v or None
+
+    @field_validator("name")
+    @classmethod
+    def _reject_placeholder_name(cls, v: str) -> str:
+        if v.lower() in _REGISTERED_AGENT_PLACEHOLDERS:
+            raise ValueError(f"Placeholder registered agent name: {v!r}")
+        return v
+
+
+def _coerce_registered_agent(v: Any) -> Any:
+    """Before-validator helper: turn unusable LLM output into ``None`` instead of failing the whole result."""
+    if v is None or isinstance(v, RegisteredAgent):
+        return v
+    if isinstance(v, str):
+        v = {"name": v}
+    if not isinstance(v, dict):
+        return None
+    try:
+        return RegisteredAgent.model_validate(v)
+    except Exception as exc:
+        logger.debug(f"[models] Dropping invalid registered_agent {v!r}: {exc}")
+        return None
+
+
 # --- OpenAI Search Models ---
 
 class OpenAISearchRequest(BaseModel):
@@ -564,6 +635,13 @@ class OpenAISearchResult(BaseModel):
             "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
         ),
     )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: OpenAICompanyInfo = Field(default_factory=OpenAICompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
@@ -574,6 +652,11 @@ class OpenAISearchResult(BaseModel):
     @classmethod
     def validate_ein(cls, v: Any) -> Optional[str]:
         return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- Gemini Search Models ---
@@ -637,6 +720,13 @@ class GeminiSearchResult(BaseModel):
             "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
         ),
     )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
@@ -647,6 +737,11 @@ class GeminiSearchResult(BaseModel):
     @classmethod
     def validate_ein(cls, v: Any) -> Optional[str]:
         return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- VOE (Verification of Employment) Models ---
@@ -899,6 +994,13 @@ class CombinedSearchResult(BaseModel):
             "if verified from public records, otherwise null."
         ),
     )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: CombinedCompanyInfo = Field(default_factory=CombinedCompanyInfo)
     summary: CombinedSearchSummary = Field(default_factory=CombinedSearchSummary)
     openai_result: Optional[OpenAISearchResult] = None
@@ -912,6 +1014,11 @@ class CombinedSearchResult(BaseModel):
     @classmethod
     def validate_ein(cls, v: Any) -> Optional[str]:
         return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- External Webhook Payload Model ---

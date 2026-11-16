@@ -21,6 +21,7 @@ from app.models import (
     GeminiSearchRequest,
     GeminiSearchResult,
     TaggedContact,
+    RegisteredAgent,
     StructuredAddress,
     ProviderTokenUsage,
     TokenUsage,
@@ -159,6 +160,40 @@ def _sanitize_official_site(raw_url: str) -> str:
         return cleaned_url
 
     return url
+
+
+def _agent_key(agent: RegisteredAgent) -> str:
+    """Case/punctuation-insensitive key so 'CT Corporation System' == 'C T CORPORATION SYSTEM.'"""
+    return re.sub(r"[^a-z0-9]", "", agent.name.lower())
+
+
+def _resolve_registered_agent(
+    openai_agent: Optional[RegisteredAgent],
+    gemini_agent: Optional[RegisteredAgent],
+    company_name: str,
+) -> Optional[RegisteredAgent]:
+    """
+    Pick the combined Registered Agent.
+
+    - Only one provider found one → use it.
+    - Both agree on the name → use OpenAI's, filling any blank
+      designation/state/address/phone from Gemini's.
+    - They disagree → default to OpenAI (same policy as EIN) and log a warning.
+    """
+    if openai_agent and gemini_agent:
+        if _agent_key(openai_agent) == _agent_key(gemini_agent):
+            return openai_agent.model_copy(update={
+                "designation": openai_agent.designation or gemini_agent.designation,
+                "state": openai_agent.state or gemini_agent.state,
+                "address": openai_agent.address or gemini_agent.address,
+                "phone": openai_agent.phone or gemini_agent.phone,
+            })
+        logger.warning(
+            f"[CombinedSearchService] Provider registered agent mismatch for {company_name!r}: "
+            f"OpenAI={openai_agent.name!r} vs Gemini={gemini_agent.name!r}. Defaulting to OpenAI."
+        )
+        return openai_agent
+    return openai_agent or gemini_agent
 
 
 class CombinedSearchService:
@@ -372,11 +407,19 @@ class CombinedSearchService:
         elif gem_ein:
             resolved_ein = gem_ein
 
+        # --- Resolve Registered Agent (same provider-preference policy as EIN) ---
+        resolved_agent = _resolve_registered_agent(
+            openai_result.registered_agent if openai_result else None,
+            gemini_result.registered_agent if gemini_result else None,
+            company_name,
+        )
+
         return CombinedSearchResult(
             company_name=company_name,
             official_company_name=resolved_official_name,
             official_site=official_site,
             ein=resolved_ein,
+            registered_agent=resolved_agent,
             company_info=company_info,
             summary=summary,
             openai_result=openai_result,

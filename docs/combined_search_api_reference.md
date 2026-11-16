@@ -42,6 +42,13 @@ Once the task status changes to `"SUCCESS"`, the aggregated contact details are 
 ### Result Fields
 * **`company_name`** (string): The requested company name.
 * **`official_site`** (string): Verified official website URL.
+* **`ein`** (string, nullable): Federal Employer Identification Number (`XX-XXXXXXX`) when verified in public records.
+* **`registered_agent`** (object, nullable): The company's Registered Agent as recorded with the state of formation (also called Resident Agent, Statutory Agent, Agent for Service of Process, Commercial Clerk, Registered Office Provider, or National Registered Agent). `null` when not found or not verifiable in the research text.
+  * **`name`** (string): Agent name — a person or a commercial agent company.
+  * **`designation`** (string, nullable): The term the source used for the role (e.g. `"Statutory Agent"`).
+  * **`state`** (string, nullable): State/jurisdiction the agent is registered in.
+  * **`address`** (string, nullable): Single-line agent address, if listed.
+  * **`phone`** (string, nullable): Agent's phone number, if listed. Dropped (set to `null`) if its digits cannot be found in the research text.
 * **`company_info`** (object): Contains arrays of distinct contacts (`phones`, `faxes`, `emails`, `addresses`). Each item is a tagged object containing:
   * **`value`** (string): The extracted contact info (e.g., email or phone number).
   * **`tag`** (string): Assigned departmental category (e.g., `"Human Resource"`, `"Payroll"`, `"Admin"`, `"Careers"`, `"Finance"`, `"Others"`).
@@ -57,6 +64,14 @@ Once the task status changes to `"SUCCESS"`, the aggregated contact details are 
   "result": {
     "company_name": "TRUCKSMART",
     "official_site": "http://www.trucksmart.com",
+    "ein": null,
+    "registered_agent": {
+      "name": "Corporation Service Company",
+      "designation": "Registered Agent",
+      "state": "CA",
+      "address": "2710 Gateway Oaks Dr Ste 150N, Sacramento, CA 95833",
+      "phone": "(800) 927-9801"
+    },
     "company_info": {
       "phones": [
         {

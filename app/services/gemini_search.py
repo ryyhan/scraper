@@ -60,6 +60,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.models import ContactTag, HintAddress, TokenUsage, ProviderTokenUsage
+from app.services import _registered_agent as reg_agent
 from app.services._retry import retry_gemini
 from app.services._token_utils import gemini_usage
 
@@ -571,14 +572,16 @@ class GeminiSearchService:
             f"  o) '{company_name}' site:yellowpages.com OR site:manta.com phone fax\n"
             f"  p) '{company_name}' annual report OR corporate directory contact phone\n"
             f"  q) '{company_name}' (\"EIN\" OR \"FEIN\" OR \"Employer Identification Number\" OR \"tax ID\" OR site:sec.gov OR \"Form 990\")\n"
-            "Do NOT stop after the first query. Execute all of the above.\n\n"
+            + reg_agent.research_query("q2", company_name)
+            + "Do NOT stop after the first query. Execute all of the above.\n\n"
             "GOALS:\n"
             "1. Find fax numbers — these are especially likely to appear in BBB listings and PDF documents.\n"
             "2. Find phone numbers for HR, Payroll, and Admin departments.\n"
             "3. Find email addresses in PDF press releases or corporate documents.\n"
             "4. Find physical addresses from business directory listings.\n"
             "5. Extract ALL contact details visible in any PDF documents you can access.\n"
-            "6. Identify the company's 9-digit Federal Employer Identification Number (EIN/FEIN) from official filings or public records if available.\n\n"
+            "6. Identify the company's 9-digit Federal Employer Identification Number (EIN/FEIN) from official filings or public records if available.\n"
+            "7. " + reg_agent.RESEARCH_GOAL + "\n\n"
             "Report ALL contact information found with its source context."
         )
 
@@ -686,7 +689,8 @@ class GeminiSearchService:
             "   - DO keep emails from outsourced HR, payroll, or benefits providers if they are explicitly "
             "presented as a contact address for reaching that function on behalf of the target company "
             "(e.g., a PEO, staffing agency, or parent company managing payroll for this entity).\n"
-            "   Only extract real, verified contact emails used to reach a person or department."
+            "   Only extract real, verified contact emails used to reach a person or department.\n"
+            "10. " + reg_agent.EXTRACTION_RULE
         )
 
         extraction_config = genai_types.GenerateContentConfig(
@@ -810,7 +814,8 @@ class GeminiSearchService:
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
             "- Preserve 'tag', 'context', 'company_name', 'official_company_name', 'official_site', and 'ein' fields unchanged "
-            "(or set 'ein' to null if its 9 digits are not found in RAW RESEARCH TEXT).\n\n"
+            "(or set 'ein' to null if its 9 digits are not found in RAW RESEARCH TEXT).\n"
+            + reg_agent.VERIFY_NOTE + "\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
             f"EXTRACTED CONTACTS:\n{extracted_json}\n\n"
             "Return the filtered result in exactly the same JSON schema."
@@ -848,6 +853,7 @@ class GeminiSearchService:
                         f"not found in raw research text for {company_name!r}"
                     )
                     verified.ein = None
+            reg_agent.ground_registered_agent(verified, research_text, "GeminiSearchService", company_name)
             logger.debug(
                 "[GeminiSearchService] Step 3: verification complete via SDK-parsed object"
             )
@@ -865,6 +871,7 @@ class GeminiSearchService:
             clean_research = re.sub(r"[^0-9]", "", research_text)
             if len(ein_digits) != 9 or ein_digits not in clean_research:
                 fallback_verified.ein = None
+        reg_agent.ground_registered_agent(fallback_verified, research_text, "GeminiSearchService", company_name)
         return fallback_verified, step_usage
 
     @staticmethod
