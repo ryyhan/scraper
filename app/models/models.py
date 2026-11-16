@@ -92,6 +92,15 @@ def _norm_tag(s: str) -> str:
     return re.sub(r"[^a-z]", "", s.lower())
 
 
+# Common acronyms mapped to their canonical ContactTag
+_TAG_ABBREVIATIONS: dict[str, ContactTag] = {
+    "hr": ContactTag.HUMAN_RESOURCE,
+    "it": ContactTag.IT,
+    "pr": ContactTag.PR,
+    "hq": ContactTag.HEADQUARTERS,
+}
+
+
 def _resolve_contact_tag(raw: Any) -> ContactTag:
     """
     Fuzzy resolver for ContactTag that survives LLM label drift.
@@ -103,8 +112,7 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
       4. Normalised match – strip all non-alpha chars, lowercase, compare
          against normalised enum values AND enum keys
          (e.g. "HumanResources", "HUMANRESOURCES", "human_resource").
-      5. Short-abbreviation prefix match (input ≤ 4 chars only, e.g. "HR", "IT").
-         The length guard prevents broad false matches like "itmanager" → IT.
+      5. Acronym & short-abbreviation match (e.g. "HR", "HQ", "IT").
       6. Fall back to ContactTag.OTHERS and log a warning.
     """
     if isinstance(raw, ContactTag):
@@ -127,14 +135,21 @@ def _resolve_contact_tag(raw: Any) -> ContactTag:
         if member.value.lower() == lower:
             return member
 
-    # Step 4 – normalised match (keep letters only, lowercase)
+    # Step 4 – normalised match (keep letters only, lowercase, handle singular/plural 's')
     norm_input = _norm_tag(stripped)
+    norm_input_stem = norm_input.rstrip("s")
     for member in ContactTag:
-        if _norm_tag(member.value) == norm_input or _norm_tag(member.name) == norm_input:
+        val_norm = _norm_tag(member.value)
+        name_norm = _norm_tag(member.name)
+        if val_norm == norm_input or name_norm == norm_input:
+            return member
+        if val_norm.rstrip("s") == norm_input_stem or name_norm.rstrip("s") == norm_input_stem:
             return member
 
-    # Step 5 – short abbreviation prefix match only (≤ 4 chars, e.g. "HR", "IT").
-    # The length guard prevents false positives like "itmanager" → IT.
+    # Step 5 – acronym & short abbreviation match
+    if norm_input in _TAG_ABBREVIATIONS:
+        return _TAG_ABBREVIATIONS[norm_input]
+
     if len(norm_input) <= 4:
         for member in ContactTag:
             if _norm_tag(member.value).startswith(norm_input):
@@ -182,6 +197,89 @@ _EMAIL_REGEX = re.compile(
     r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$"  # one or more .label segments
 )
 
+# ---------------------------------------------------------------------------
+# EIN / FEIN (Employer Identification Number) Validation & Normalization
+# ---------------------------------------------------------------------------
+
+_VALID_IRS_PREFIXES: frozenset[str] = frozenset({
+    "01", "02", "03", "04", "05", "06",
+    "10", "11", "12", "13", "14", "15", "16",
+    "20", "21", "22", "23", "24", "25", "26", "27",
+    "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
+    "40", "41", "42", "43", "44", "45", "46", "47", "48",
+    "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
+    "60", "61", "62", "63", "64", "65", "66", "67", "68",
+    "71", "72", "73", "74", "75", "76", "77",
+    "80", "81", "82", "83", "84", "85", "86", "87", "88",
+    "90", "91", "92", "93", "94", "95",
+    "98", "99",
+})
+
+_INVALID_EIN_PATTERNS: frozenset[str] = frozenset({
+    "000000000",
+    "111111111",
+    "222222222",
+    "333333333",
+    "444444444",
+    "555555555",
+    "666666666",
+    "777777777",
+    "888888888",
+    "999999999",
+    "123456789",
+    "987654321",
+})
+
+
+def validate_and_normalize_ein(v: Any) -> Optional[str]:
+    """Validate and normalise an EIN/FEIN string into 'XX-XXXXXXX' or None.
+
+    Accepts:
+      - 'XX-XXXXXXX' (e.g. '12-3456780')
+      - Raw 9 digits 'XXXXXXXXX' (e.g. '123456780' -> normalises to '12-3456780')
+
+    Rejects:
+      - Non-string or empty / whitespace / placeholder strings ('N/A', 'None', etc.)
+      - Social Security Number formatting ('XXX-XX-XXXX')
+      - Strings that do not contain exactly 9 numeric digits
+      - Repetitive or sequential dummy patterns ('00-0000000', '12-3456789')
+      - Invalid IRS campus two-digit prefixes (e.g. '00', '07', '96')
+    """
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        return None
+
+    stripped = v.strip()
+    if not stripped:
+        return None
+
+    lower = stripped.lower()
+    if lower in ("none", "n/a", "na", "null", "not_found", "not found", "unknown", "undefined"):
+        return None
+
+    # Reject SSN format (3-2-4 digits) to prevent accidental SSN misclassification
+    if re.match(r"^\d{3}-\d{2}-\d{4}$", stripped):
+        logger.debug(f"[EIN] Rejected value matching SSN format rather than EIN: {stripped!r}")
+        return None
+
+    digits = re.sub(r"[^0-9]", "", stripped)
+    if len(digits) != 9:
+        logger.debug(f"[EIN] Rejected non-9-digit EIN candidate: {stripped!r}")
+        return None
+
+    if digits in _INVALID_EIN_PATTERNS or len(set(digits)) == 1:
+        logger.debug(f"[EIN] Rejected dummy/placeholder EIN sequence: {stripped!r}")
+        return None
+
+    prefix = digits[:2]
+    if prefix not in _VALID_IRS_PREFIXES:
+        logger.debug(f"[EIN] Rejected EIN with unassigned IRS campus prefix: {prefix!r} ({stripped!r})")
+        return None
+
+    return f"{prefix}-{digits[2:]}"
+
+
 
 def _filter_tagged_contacts(v: Any) -> list:
     """List-level validator: try to build each TaggedContact and silently drop invalid items.
@@ -223,18 +321,18 @@ class TaggedContact(BaseModel):
         stripped = v.strip()
         lower = stripped.lower()
 
-        # --- Not an email (phone/fax/etc.) — skip all email checks ---
+        # --- Step 1: Block known Cloudflare obfuscation placeholders (e.g. "[email protected]") ---
+        if lower in _BLOCKED_EMAILS or any(b in lower for b in _BLOCKED_EMAILS):
+            raise ValueError(f"Blocked placeholder email: {v!r}")
+
+        # --- Not an email (phone/fax/etc.) — skip remaining email checks ---
         if "@" not in lower:
             return stripped
 
-        # --- Step 1: Must be a valid email address format ---
+        # --- Step 2: Must be a valid email address format ---
         # Rejects hallucinations like "contact form on website" or "name@...com"
         if not _EMAIL_REGEX.match(stripped):
             raise ValueError(f"Not a valid email address format: {v!r}")
-
-        # --- Step 2: Block known Cloudflare obfuscation placeholders ---
-        if lower in _BLOCKED_EMAILS:
-            raise ValueError(f"Blocked placeholder email: {v!r}")
 
         # --- Step 3: Block known bad domains ---
         for domain in _BLOCKED_EMAIL_DOMAINS:
@@ -270,6 +368,26 @@ class StructuredAddress(BaseModel):
     def coerce_tag(cls, v: Any) -> ContactTag:
         """Fuzzy-resolve LLM tag labels; falls back to OTHERS on no match."""
         return _resolve_contact_tag(v)
+
+
+def _filter_structured_addresses(v: Any) -> list:
+    """List-level validator: try to build each StructuredAddress and silently drop invalid items.
+
+    This prevents a single malformed address (e.g. non-dict or invalid schema)
+    from invalidating the entire company info model.
+    """
+    if not isinstance(v, list):
+        return v
+    result = []
+    for item in v:
+        if isinstance(item, StructuredAddress):
+            result.append(item)
+            continue
+        try:
+            result.append(StructuredAddress.model_validate(item))
+        except Exception as exc:
+            logger.debug(f"[models] Dropping invalid address item {item!r}: {exc}")
+    return result
 
 
 class HintAddress(BaseModel):
@@ -312,6 +430,15 @@ class ContactInfo(BaseModel):
     Email: List[str] = Field(default_factory=list)
     Address: List[str] = Field(default_factory=list)
     DeptContacts: Optional[Dict[str, Any]] = None
+    EIN: Optional[str] = Field(
+        default=None,
+        description="Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' if verified, otherwise null.",
+    )
+
+    @field_validator("EIN", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
 
     @field_validator('Phone', 'Fax', mode='before')
     @classmethod
@@ -363,7 +490,87 @@ class ContactInfo(BaseModel):
 class ScrapeResult(BaseModel):
     poe_name: str
     official_site: str
+    ein: Optional[str] = Field(
+        default=None,
+        description="Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' if verified, otherwise null.",
+    )
     poe_info: Optional[ContactInfo] = None
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
+
+
+# --- Registered Agent ---
+
+_REGISTERED_AGENT_PLACEHOLDERS = frozenset({
+    "", "n/a", "na", "none", "null", "unknown", "not found", "not available",
+    "not_found", "not applicable", "tbd", "string",
+})
+
+
+class RegisteredAgent(BaseModel):
+    """
+    The company's Registered Agent as recorded with the state of formation.
+
+    States use different terms for the same role (Registered Agent, Resident
+    Agent, Statutory Agent, Agent for Service of Process, Commercial Clerk,
+    Registered Office Provider, National Registered Agent); ``designation``
+    preserves the term used by the source while ``name`` is always the agent's
+    name (an individual or a commercial agent company).
+    """
+    name: str = Field(description="Name of the registered agent (person or company).")
+    designation: Optional[str] = Field(
+        default=None,
+        description="Term used by the source for this role (e.g. 'Statutory Agent', 'Resident Agent').",
+    )
+    state: Optional[str] = Field(
+        default=None,
+        description="State / jurisdiction in which the agent is registered (e.g. 'DE', 'Texas').",
+    )
+    address: Optional[str] = Field(
+        default=None,
+        description="Single-line address of the registered agent, if listed.",
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        description="Phone number of the registered agent, if listed.",
+    )
+
+    @field_validator("name", "designation", "state", "address", "phone", mode="before")
+    @classmethod
+    def _clean_str(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = re.sub(r"\s+", " ", v).strip()
+        return v
+
+    @field_validator("designation", "state", "address", "phone")
+    @classmethod
+    def _empty_to_none(cls, v: Optional[str]) -> Optional[str]:
+        return v or None
+
+    @field_validator("name")
+    @classmethod
+    def _reject_placeholder_name(cls, v: str) -> str:
+        if v.lower() in _REGISTERED_AGENT_PLACEHOLDERS:
+            raise ValueError(f"Placeholder registered agent name: {v!r}")
+        return v
+
+
+def _coerce_registered_agent(v: Any) -> Any:
+    """Before-validator helper: turn unusable LLM output into ``None`` instead of failing the whole result."""
+    if v is None or isinstance(v, RegisteredAgent):
+        return v
+    if isinstance(v, str):
+        v = {"name": v}
+    if not isinstance(v, dict):
+        return None
+    try:
+        return RegisteredAgent.model_validate(v)
+    except Exception as exc:
+        logger.debug(f"[models] Dropping invalid registered_agent {v!r}: {exc}")
+        return None
 
 
 # --- OpenAI Search Models ---
@@ -402,6 +609,11 @@ class OpenAICompanyInfo(BaseModel):
     def drop_invalid_contacts(cls, v: Any) -> list:
         return _filter_tagged_contacts(v)
 
+    @field_validator("addresses", mode="before")
+    @classmethod
+    def drop_invalid_addresses(cls, v: Any) -> list:
+        return _filter_structured_addresses(v)
+
 
 
 class OpenAISearchResult(BaseModel):
@@ -416,11 +628,35 @@ class OpenAISearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
+        ),
+    )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: OpenAICompanyInfo = Field(default_factory=OpenAICompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Token consumption breakdown for this pipeline run (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- Gemini Search Models ---
@@ -459,6 +695,11 @@ class GeminiCompanyInfo(BaseModel):
     def drop_invalid_contacts(cls, v: Any) -> list:
         return _filter_tagged_contacts(v)
 
+    @field_validator("addresses", mode="before")
+    @classmethod
+    def drop_invalid_addresses(cls, v: Any) -> list:
+        return _filter_structured_addresses(v)
+
 
 class GeminiSearchResult(BaseModel):
     """Full response envelope returned by the /gemini-search/ endpoint."""
@@ -472,11 +713,35 @@ class GeminiSearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records (e.g. SEC EDGAR, IRS 990, corporate registry), otherwise null."
+        ),
+    )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: GeminiCompanyInfo = Field(default_factory=GeminiCompanyInfo)
     token_usage: Optional[TokenUsage] = Field(
         default=None,
         description="Token consumption breakdown for this pipeline run (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- VOE (Verification of Employment) Models ---
@@ -722,6 +987,20 @@ class CombinedSearchResult(BaseModel):
         ),
     )
     official_site: str = ""
+    ein: Optional[str] = Field(
+        default=None,
+        description=(
+            "Federal Employer Identification Number (FEIN/EIN) formatted as 'XX-XXXXXXX' "
+            "if verified from public records, otherwise null."
+        ),
+    )
+    registered_agent: Optional[RegisteredAgent] = Field(
+        default=None,
+        description=(
+            "Registered Agent (a.k.a. Resident / Statutory Agent, Agent for Service of Process) "
+            "on file with the state of formation, if found in public records, otherwise null."
+        ),
+    )
     company_info: CombinedCompanyInfo = Field(default_factory=CombinedCompanyInfo)
     summary: CombinedSearchSummary = Field(default_factory=CombinedSearchSummary)
     openai_result: Optional[OpenAISearchResult] = None
@@ -730,6 +1009,16 @@ class CombinedSearchResult(BaseModel):
         default=None,
         description="Aggregated token consumption from both providers (populated on task completion).",
     )
+
+    @field_validator("ein", mode="before")
+    @classmethod
+    def validate_ein(cls, v: Any) -> Optional[str]:
+        return validate_and_normalize_ein(v)
+
+    @field_validator("registered_agent", mode="before")
+    @classmethod
+    def validate_registered_agent(cls, v: Any) -> Any:
+        return _coerce_registered_agent(v)
 
 
 # --- External Webhook Payload Model ---
@@ -768,13 +1057,9 @@ class BgCheckFields(BaseModel):
         default="",
         description="Full name of the subject / applicant being screened.",
     )
-    date_of_birth: str = Field(
-        default="",
-        description="Subject's date of birth in YYYY-MM-DD format, or ''.",
-    )
     requested_by: str = Field(
         default="",
-        description="Name or organisation that ordered the background check.",
+        description="Name of the person who submitted the background check request.",
     )
     employer_name: str = Field(
         default="",
@@ -791,6 +1076,22 @@ class BgCheckFields(BaseModel):
             "(e.g. 'Clear', 'Consider', 'Adverse Action')."
         ),
     )
+    phone_number: str = Field(
+        default="",
+        description="Employer's phone number as it appears on the report.",
+    )
+    fax_number: str = Field(
+        default="",
+        description="Employer's fax number as it appears on the report.",
+    )
+    department: str = Field(
+        default="",
+        description="Department at the employer named on the report.",
+    )
+    submitted_by: str = Field(
+        default="",
+        description="Name of the person who submitted the fax.",
+    )
 
 
 class BgCheckParseResult(BaseModel):
@@ -800,18 +1101,100 @@ class BgCheckParseResult(BaseModel):
     processing_time_seconds: float = Field(
         description="Total wall-clock time for both pipeline stages."
     )
+    page_count: int = Field(
+        default=0,
+        description="Number of pages detected in the uploaded PDF.",
+    )
     data: BgCheckFields = Field(
         default_factory=BgCheckFields,
         description="Extracted structured fields from the background check PDF.",
     )
 
 
+# ---------------------------------------------------------------------------
+# Company Matcher Models
+# ---------------------------------------------------------------------------
+
+class CompanyMatchRequest(BaseModel):
+    """Request body for POST /match-companies/."""
+
+    company_a: str = Field(
+        min_length=1,
+        max_length=500,
+        description="First company name string to compare.",
+    )
+    company_b: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Second company name string to compare.",
+    )
+    provider: Literal["groq", "openai", "gemini"] = Field(
+        default="groq",
+        description=(
+            "LLM provider to use for matching. "
+            "'groq' is fastest and cheapest (llama-3.1-8b-instant); "
+            "'openai' and 'gemini' offer higher accuracy for edge cases."
+        ),
+    )
+    deep_search: bool = Field(
+        default=False,
+        description=(
+            "When True, performs a live web search for each company name before "
+            "the verdict call.  Resolves trade names, DBA names, and local businesses "
+            "that the LLM's training data may not recognise "
+            "(e.g. 'Thomas Electrical' → 'THOMAS P. OWENS, LLC'). "
+            "Adds 3–10 s of latency and consumes additional API tokens. "
+            "OpenAI and Gemini use their native search tools; Groq falls back to "
+            "OpenAI web search for the research step."
+        ),
+    )
+    location_hint: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional geographic context to disambiguate local businesses "
+            "(e.g. 'Colorado', 'Denver, CO'). Only used when deep_search=True."
+        ),
+    )
+
+
+class CompanyMatchResult(BaseModel):
+    """Response envelope for POST /match-companies/."""
+
+    company_a: str = Field(description="The first company name as submitted.")
+    company_b: str = Field(description="The second company name as submitted.")
+    is_same_company: bool = Field(
+        description=(
+            "True when both names resolve to the same real-world entity "
+            "(same brand, abbreviation, legal name, or a clear typo/OCR variant)."
+        )
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Model's self-reported confidence in the verdict (0.0 – 1.0).",
+    )
+    reasoning: str = Field(
+        description="One-sentence explanation of the verdict from the LLM."
+    )
+    provider: str = Field(description="LLM provider that produced this result.")
+    deep_search_used: bool = Field(
+        default=False,
+        description="True when a live web-search research step was executed before the verdict.",
+    )
+    processing_time_seconds: float = Field(
+        description="Total wall-clock time including research + verdict (seconds)."
+    )
+
+
 # --- Database Model ---
+
 
 class TaskRecord(SQLModel, table=True):
     task_id: str = Field(primary_key=True)
-    status: str = Field(default="PENDING")  # PENDING, IN_PROGRESS, SUCCESS, FAILURE
+    task_type: str = Field(default="general", index=True)
+    status: str = Field(default="PENDING", index=True)  # PENDING, IN_PROGRESS, SUCCESS, FAILURE
     message: Optional[str] = Field(default=None)
     result_data: Optional[Dict[str, Any]] = Field(default=None, sa_type=JSON)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

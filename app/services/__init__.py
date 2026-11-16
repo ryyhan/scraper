@@ -1,4 +1,4 @@
-from .scraper import ScraperService
+from .scraper import ScraperService, BrowserPool
 from .llm import LLMService
 from .webhook import WebhookService
 from .openai_search import OpenAISearchService
@@ -10,3 +10,4 @@ from .pdf_extractor import PdfExtractorService
 from .bg_check_parser import BgCheckParserService
 from .gemini_find_poe import GeminiFindPoeService
 from .openai_find_poe import OpenAIFindPoeService
+from .company_matcher import CompanyMatcherService

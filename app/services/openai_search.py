@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.models import ContactTag, HintAddress, TokenUsage, ProviderTokenUsage
+from app.services import _registered_agent as reg_agent
 from app.services._retry import retry_openai
 from app.services._token_utils import openai_usage
 
@@ -198,7 +199,11 @@ class OpenAISearchService:
             "   - Any URL with tracking query parameters (e.g. utm_source=openai) — return "
             "only the clean base URL without such parameters.\n"
             "If no company-owned official URL was found in the research, leave this as an empty string.\n"
-            "8. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
+            "8. Fill 'ein' with the company's 9-digit Federal Employer Identification Number (FEIN/EIN) "
+            "formatted strictly as 'XX-XXXXXXX' (two digits, hyphen, seven digits). "
+            "Look in official filings, SEC EDGAR reports, IRS Form 990, corporate registrations, "
+            "or public tax documents. If not found or uncertain, set 'ein' to null. NEVER invent or guess an EIN.\n"
+            "9. EXCLUDE PLACEHOLDERS AND PLATFORM ACCESS EMAILS:\n"
             "   - Do NOT extract dummy/example emails (e.g., 'email@...', 'example@...', 'name@...', 'abc@...').\n"
             "   - Do NOT extract emails that appear as instructions for logging into or accessing a third-party "
             "software platform, LMS, or tool (e.g., 'use training@vendor.com to access the training portal', "
@@ -206,7 +211,8 @@ class OpenAISearchService:
             "   - DO keep emails from outsourced HR, payroll, or benefits providers if they are explicitly "
             "presented as a contact address for reaching that function on behalf of the target company "
             "(e.g., a PEO, staffing agency, or parent company managing payroll for this entity).\n"
-            "   Only extract real, verified contact emails used to reach a person or department."
+            "   Only extract real, verified contact emails used to reach a person or department.\n"
+            "10. " + reg_agent.EXTRACTION_RULE
         )
 
         @retry_openai()
@@ -504,8 +510,11 @@ class OpenAISearchService:
             f"  m) '{company_name}' \"tel:\" OR \"fax:\" contact\n"
             f"  n) '{company_name} fax number' site:bbb.org\n"
             f"  o) '{company_name}' site:yellowpages.com OR site:manta.com phone fax\n"
-            "Do NOT skip any query. Report ALL new contact details found that were not "
-            "already identified in the previous research turn."
+            f"  o2) '{company_name}' (\"EIN\" OR \"FEIN\" OR \"Employer Identification Number\" OR \"IRS\" OR site:sec.gov OR \"Form 990\")\n"
+            + reg_agent.research_query("o3", company_name)
+            + "Do NOT skip any query. Report ALL new contact details found that were not "
+            "already identified in the previous research turn.\n"
+            + reg_agent.RESEARCH_GOAL
         )
 
         logger.debug(f"[OpenAISearchService] Turn 2: PDFs/BBB/Schema for {company_name!r}")
@@ -642,7 +651,9 @@ class OpenAISearchService:
             "  b) It is NOT a generic email as defined above (i.e. it has a specific departmental "
             "prefix that was never explicitly found on any source page).\n\n"
             "- Do NOT add any new contacts not already in EXTRACTED CONTACTS.\n"
-            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', and 'official_site' unchanged.\n"
+            "- Preserve 'tag', 'context', 'company_name', 'official_company_name', 'official_site', and 'ein' unchanged "
+            "(or set 'ein' to null if its 9 digits are not found in RAW RESEARCH TEXT).\n"
+            + reg_agent.VERIFY_NOTE +
             "- IMPORTANT: Return ONLY the filtered data values in the EXACT SAME JSON structure "
             "as EXTRACTED CONTACTS below. Do NOT return a schema or type definition.\n\n"
             f"RAW RESEARCH TEXT:\n{research_text}\n\n"
@@ -669,6 +680,18 @@ class OpenAISearchService:
         cleaned_data = self._clean_dict(data)
         try:
             verified = model_class.model_validate(cleaned_data)
+            # Anti-hallucination check for EIN: ensure the 9 digits actually appear in research_text
+            if hasattr(verified, "ein") and verified.ein:
+                ein_digits = re.sub(r"[^0-9]", "", verified.ein)
+                clean_research = re.sub(r"[^0-9]", "", research_text)
+                if len(ein_digits) != 9 or ein_digits not in clean_research:
+                    logger.warning(
+                        f"[OpenAISearchService] Step 3: removing unverified EIN {verified.ein!r} "
+                        f"not found in raw research text for {company_name!r}"
+                    )
+                    verified.ein = None
+            reg_agent.ground_registered_agent(verified, research_text, "OpenAISearchService", company_name)
+
             logger.debug(
                 f"[OpenAISearchService] Step 3: verification complete for {company_name!r}"
             )
@@ -680,6 +703,12 @@ class OpenAISearchService:
                 f"[OpenAISearchService] Step 3: verification parse failed ({exc}); "
                 f"returning pre-verification result for {company_name!r}"
             )
+            if hasattr(extracted, "ein") and extracted.ein:
+                ein_digits = re.sub(r"[^0-9]", "", extracted.ein)
+                clean_research = re.sub(r"[^0-9]", "", research_text)
+                if len(ein_digits) != 9 or ein_digits not in clean_research:
+                    extracted.ein = None
+            reg_agent.ground_registered_agent(extracted, research_text, "OpenAISearchService", company_name)
             return extracted, step_usage
 
     @staticmethod

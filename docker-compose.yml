@@ -1,0 +1,91 @@
+# =============================================================================
+# docker-compose.yml — Async Scraper API
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in your API keys.
+#   2. docker compose up --build
+#   3. API is available at http://localhost:8000
+#      Docs at http://localhost:8000/docs
+# =============================================================================
+
+services:
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Use the "runtime" target (final multi-stage stage)
+      target: runtime
+
+    container_name: scraper_api
+
+    restart: unless-stopped
+
+    # -------------------------------------------------------------------------
+    # Port mapping: host:container
+    # Change the host port (left side) if 8000 is already taken on your machine.
+    # -------------------------------------------------------------------------
+    ports:
+      - "8000:8000"
+
+    # -------------------------------------------------------------------------
+    # Environment variables
+    #   Values here OVERRIDE what is baked into the Dockerfile ENV layer.
+    #   The .env file (gitignored) is automatically loaded by Docker Compose.
+    # -------------------------------------------------------------------------
+    env_file:
+      - .env          # Contains GROQ_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.
+
+    environment:
+      # SQLite database stored in the named volume (persistent across restarts)
+      DATABASE_URL: "sqlite:////data/tasks.db"
+
+      # Log file path inside the container (also visible via docker logs)
+      # The app writes to scraper.log in the WORKDIR (/app); map it to the
+      # logs volume so it survives container restarts.
+
+      # Browser concurrency gate (tune based on host RAM)
+      MAX_CONCURRENT_BROWSERS: "4"
+
+      # Search provider: "duckduckgo" (default, no key needed) or "serper"
+      SEARCH_PROVIDER: "duckduckgo"
+
+    # -------------------------------------------------------------------------
+    # Volumes
+    #   db-data  — SQLite .db file (tasks.db) persists across `docker compose down`
+    #   logs     — scraper.log persists across restarts for post-mortem debugging
+    # -------------------------------------------------------------------------
+    volumes:
+      - db-data:/data
+      - logs:/app/scraper_logs
+
+    # -------------------------------------------------------------------------
+    # Health check
+    #   Docker will restart the container if /docs stops responding.
+    #   Gives the app 30 s to start before the first check.
+    # -------------------------------------------------------------------------
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    # -------------------------------------------------------------------------
+    # Resource limits (optional — uncomment and tune as needed)
+    # -------------------------------------------------------------------------
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "2"
+    #       memory: "4G"
+
+# =============================================================================
+# Named volumes — data survives `docker compose down`
+# Use `docker compose down -v` to also wipe volumes.
+# =============================================================================
+volumes:
+  db-data:
+    driver: local
+  logs:
+    driver: local

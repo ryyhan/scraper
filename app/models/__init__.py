@@ -25,6 +25,7 @@ from .models import (
     SourceStats,
     CombinedSearchSummary,
     TaggedContact,
+    RegisteredAgent,
     ContactTag,
     StructuredAddress,
     HintAddress,
@@ -33,4 +34,7 @@ from .models import (
     BgCheckParseResult,
     ProviderTokenUsage,
     TokenUsage,
+    CompanyMatchRequest,
+    CompanyMatchResult,
+    validate_and_normalize_ein,
 )
