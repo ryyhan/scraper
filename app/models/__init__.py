@@ -30,6 +30,7 @@ from .models import (
     StructuredAddress,
     HintAddress,
     PdfExtractionResult,
+    TranscriptionResult,
     BgCheckFields,
     BgCheckParseResult,
     ProviderTokenUsage,

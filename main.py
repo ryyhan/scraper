@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.api.deps import engine
 from app.api.routes import router as api_router
 from app.services.scraper import BrowserPool
+from app.services.audio_transcriber import AudioTranscriberService
 
 from sqlalchemy import text
 
@@ -45,6 +46,13 @@ async def lifespan(app: FastAPI):
         logger.warning(
             f"Failed to pre-warm persistent Playwright browser pool on startup (will initialize on demand): {e}"
         )
+    if settings.TRANSCRIBE_PRELOAD_MODEL:
+        try:
+            await asyncio.to_thread(AudioTranscriberService.load_model)
+        except Exception as e:
+            logger.warning(
+                f"Failed to pre-load transcription model on startup (will load on first request): {e}"
+            )
     yield
     await BrowserPool.get_instance().close()
     logger.info("Application shutdown: browser pool closed.")

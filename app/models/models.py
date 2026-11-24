@@ -1038,6 +1038,17 @@ class PdfExtractionResult(BaseModel):
     processing_time_seconds: float                         # Wall-clock time for the LLM call
 
 
+# --- Audio Transcription Models ---
+
+class TranscriptionResult(BaseModel):
+    """Result stored on the TaskRecord for a completed /transcribe-audio/ task."""
+    filename: str                    # Original uploaded filename
+    model: str                       # Local ASR model used
+    duration_seconds: float          # Length of the decoded audio
+    text: str                        # Plain-text transcript ("" if no speech detected)
+    processing_time_seconds: float   # Wall-clock time for decode + transcription
+
+
 
 # --- Background Check Parser Models ---
 

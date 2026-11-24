@@ -29,6 +29,9 @@ tasks.db-wal
 scraper.log
 *.log
 
+# Local transcription model weights (the image downloads its own to /opt/models)
+models/
+
 # Environment files — never bake secrets into the image
 .env
 
