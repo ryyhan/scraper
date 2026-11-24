@@ -65,6 +65,17 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 
 # -----------------------------------------------------------------------------
+# Local transcription model (Parakeet TDT 0.6B v3, int8) + Silero VAD
+#   Baked into the image at build time so the container never downloads
+#   anything at runtime. Path layout must match AudioTranscriberService
+#   (<TRANSCRIBE_MODELS_DIR>/asr and <TRANSCRIBE_MODELS_DIR>/vad).
+# -----------------------------------------------------------------------------
+ENV TRANSCRIBE_MODELS_DIR=/opt/models
+RUN python -c "import onnx_asr; \
+onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', '/opt/models/asr', quantization='int8'); \
+onnx_asr.load_vad('silero', '/opt/models/vad')"
+
+# -----------------------------------------------------------------------------
 # Application
 # -----------------------------------------------------------------------------
 WORKDIR /app
@@ -82,7 +93,11 @@ ENV DATABASE_URL="sqlite:////data/tasks.db" \
     OPENAI_OCR_MODEL="gpt-4o-mini" \
     GEMINI_MODEL="gemini-2.5-flash-lite" \
     GEMINI_OCR_MODEL="gemini-2.5-flash-lite" \
-    GROQ_MODEL="llama-3.1-8b-instant"
+    GROQ_MODEL="llama-3.1-8b-instant" \
+    TRANSCRIBE_MODEL="nemo-parakeet-tdt-0.6b-v3" \
+    TRANSCRIBE_QUANTIZATION="int8" \
+    MAX_CONCURRENT_TRANSCRIPTIONS=1 \
+    AUDIO_MAX_FILE_SIZE_MB=100
 
 # -----------------------------------------------------------------------------
 # Entrypoint

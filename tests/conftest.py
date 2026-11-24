@@ -14,6 +14,7 @@ os.environ.setdefault("GROQ_API_KEY", "test-groq-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+os.environ.setdefault("TRANSCRIBE_PRELOAD_MODEL", "false")  # never load Parakeet in tests
 
 from main import app
 from app.api.deps import get_session

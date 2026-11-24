@@ -37,7 +37,8 @@ The service provides automated discovery, deep crawling, employment verification
    - [7. Company Name Matcher (`/match-companies/`)](#7-company-name-matcher-match-companies)
    - [8. Vision PDF Text Extraction (`/extract-pdf/`)](#8-vision-pdf-text-extraction-extract-pdf)
    - [9. Background Check Report Parser (`/parse-background-check/`)](#9-background-check-report-parser-parse-background-check)
-   - [10. Webhook Mock (`/webhook-mock`)](#10-webhook-mock-webhook-mock)
+   - [10. Local Audio Transcription (`/transcribe-audio/`)](#10-local-audio-transcription-transcribe-audio)
+   - [11. Webhook Mock (`/webhook-mock`)](#11-webhook-mock-webhook-mock)
 8. [Data Models & Taxonomy](#data-models--taxonomy)
    - [Departmental Contact Taxonomy (`ContactTag`)](#departmental-contact-taxonomy-contacttag)
    - [Disambiguation Address Input (`HintAddress`)](#disambiguation-address-input-hintaddress)
@@ -113,6 +114,7 @@ flowchart TD
 | `POST /match-companies/` | Groq, OpenAI, or Gemini | Synchronous | Entity resolution, acronym resolution, legal suffix stripping, deep search mode | Direct call |
 | `POST /extract-pdf/` | Gemini Files API or OpenAI Vision (`pypdfium2`) | Synchronous | Whole-document OCR, form checkbox & radio state transcribing (`[SELECTED]`) | Direct call |
 | `POST /parse-background-check/` | Gemini or OpenAI | Synchronous | Two-stage parsing for HR/screening reports (HireRight, Sterling, Checkr, etc.) | Direct call |
+| `POST /transcribe-audio/` | Local: Parakeet TDT 0.6B v3 (`onnx-asr`, CPU) + Silero VAD | Async (Background) | On-host speech-to-text, multilingual auto-detect, any common audio format via PyAV | `TRANSCRIBE_SEMAPHORE` (default: 1) |
 | `POST /webhook-mock` | Local | Synchronous | Echo & test endpoint for webhook callback inspection | Direct call |
 
 ---
@@ -210,6 +212,14 @@ Configuration is managed via Pydantic Settings in `app/core/config.py` and loade
 | `GEMINI_MODEL` | `string` | `"gemini-2.5-flash-lite"` | Model used for Gemini search, verification, and POE discovery |
 | `GEMINI_OCR_MODEL` | `string` | `"gemini-2.5-flash-lite"` | Model used for Gemini Files API PDF extraction (use `gemini-2.5-pro` for handwriting) |
 | `GROQ_MODEL` | `string` | `"llama-3.1-8b-instant"` | Model used for Groq website verification and company matching |
+| `TRANSCRIBE_MODEL` | `string` | `"nemo-parakeet-tdt-0.6b-v3"` | Local `onnx-asr` model used by `/transcribe-audio/` |
+| `TRANSCRIBE_QUANTIZATION` | `string` | `"int8"` | `"int8"` for CPU, or `"none"` for full precision |
+| `TRANSCRIBE_MODELS_DIR` | `string` | `"models"` | Model directory (`<dir>/asr`, `<dir>/vad`). Relative paths resolve from the project root. Downloaded from Hugging Face on the first load and read locally after that. Docker: `/opt/models`, baked into the image at build time |
+| `TRANSCRIBE_NUM_THREADS` | `integer` | `0` | ONNX Runtime CPU threads (`0` = all cores). Lower it to leave CPU for the browsers |
+| `TRANSCRIBE_MAX_SEGMENT_SECONDS` | `float` | `20.0` | Longest VAD speech segment sent to the model |
+| `TRANSCRIBE_PRELOAD_MODEL` | `bool` | `true` | Load the model at startup instead of on the first request |
+| `MAX_CONCURRENT_TRANSCRIPTIONS` | `integer` | `1` | Concurrent transcription jobs |
+| `AUDIO_MAX_FILE_SIZE_MB` | `integer` | `100` | Maximum upload size for `/transcribe-audio/` |
 
 ---
 
@@ -793,7 +803,34 @@ A specialized two-stage pipeline for pre-employment screening reports (HireRight
 
 ---
 
-### 10. Webhook Mock (`/webhook-mock`)
+### 10. Local Audio Transcription (`/transcribe-audio/`)
+
+Transcribes audio entirely on the host, with no external API, so audio never leaves the server. PyAV decodes the upload to 16 kHz mono. Silero VAD splits it into speech segments; this is required because Parakeet handles only about 20–30 s per pass. NVIDIA **Parakeet TDT 0.6B v3** (int8 ONNX, CPU) transcribes each segment. The model detects the language automatically across 25 European languages, English included.
+
+- **Endpoint**: `POST /transcribe-audio/`
+- **Execution**: Async (Background), polled via `GET /transcribe-audio/{task_id}`, with failures listed at `GET /transcribe-audio/failed/`
+- **Content-Type**: `multipart/form-data`
+- **Parameters**:
+  - `file`: audio binary (wav, mp3, m4a, mp4, aac, ogg, oga, opus, flac, webm, amr, 3gp, wma). Max `AUDIO_MAX_FILE_SIZE_MB` (default 100 MB)
+- **Errors**: `400` for an unsupported extension, an empty file, or content that isn't audio. `413` when the file is too large.
+- **Initial response** (`200 OK`):
+```json
+{ "task_id": "uuid-string", "status": "IN_PROGRESS" }
+```
+- **Completed `result`**:
+```json
+{
+  "filename": "call_recording.mp3",
+  "model": "nemo-parakeet-tdt-0.6b-v3",
+  "duration_seconds": 184.3,
+  "text": "Hi, I'm calling to verify employment for Jane Doe...",
+  "processing_time_seconds": 21.7
+}
+```
+
+---
+
+### 11. Webhook Mock (`/webhook-mock`)
 
 Test endpoint that accepts incoming `WebhookPayload` objects and logs them. Useful for local testing of webhook delivery.
 

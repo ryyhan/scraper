@@ -11,3 +11,4 @@ from .bg_check_parser import BgCheckParserService
 from .gemini_find_poe import GeminiFindPoeService
 from .openai_find_poe import OpenAIFindPoeService
 from .company_matcher import CompanyMatcherService
+from .audio_transcriber import AudioTranscriberService

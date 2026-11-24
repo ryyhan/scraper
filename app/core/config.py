@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     GEMINI_OCR_MODEL: str = "gemini-2.5-flash-lite"  # Model used for PDF native/Files API OCR processing
     GROQ_MODEL: str = "llama-3.1-8b-instant"
 
+    # Local audio transcription (/transcribe-audio/) — runs fully on-host via onnx-asr.
+    TRANSCRIBE_MODEL: str = "nemo-parakeet-tdt-0.6b-v3"
+    TRANSCRIBE_QUANTIZATION: str = "int8"          # "int8" (CPU-friendly) or "none" for full precision
+    TRANSCRIBE_MODELS_DIR: str = "models"          # Model dir; relative paths resolve from the project root
+    TRANSCRIBE_NUM_THREADS: int = 0                # ONNX intra-op threads; 0 = all cores
+    TRANSCRIBE_MAX_SEGMENT_SECONDS: float = 20.0   # VAD max speech segment (Parakeet limit ~20–30 s)
+    TRANSCRIBE_PRELOAD_MODEL: bool = True          # Load the model at startup instead of first request
+    MAX_CONCURRENT_TRANSCRIPTIONS: int = 1         # CPU-bound; >1 rarely helps on a shared host
+    AUDIO_MAX_FILE_SIZE_MB: int = 100
+
     # Loads .env file
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True)
 

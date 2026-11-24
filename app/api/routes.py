@@ -18,6 +18,7 @@ from app.models import PdfExtractionResult
 from app.models import BgCheckFields, BgCheckParseResult
 from app.models import FindPoeRequest, FindPoeResult, FindPoeProviderResult, CombinedFindPoeResult
 from app.models import CompanyMatchRequest, CompanyMatchResult
+from app.models import TranscriptionResult
 from app.api.deps import get_session
 from app.api.rate_limit import task_rate_limit
 from app.services import ScraperService, LLMService, WebhookService
@@ -29,11 +30,13 @@ from app.services import PdfExtractorService
 from app.services import BgCheckParserService
 from app.services import GeminiFindPoeService, OpenAIFindPoeService
 from app.services import CompanyMatcherService
+from app.services import AudioTranscriberService
 from app.core.config import settings
 
 router = APIRouter()
 BROWSER_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_BROWSERS)
 COMBINED_SEARCH_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_COMBINED_SEARCHES)
+TRANSCRIBE_SEMAPHORE = asyncio.Semaphore(settings.MAX_CONCURRENT_TRANSCRIPTIONS)
 
 # Strong module-level references to background asyncio tasks to prevent garbage collection
 _background_tasks: Set[asyncio.Task[Any]] = set()
@@ -1620,3 +1623,177 @@ async def match_companies(
     """
     service = CompanyMatcherService()
     return await service.match(request)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local Audio Transcription Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_transcription_task(task_id: str, filename: str, audio_bytes: bytes) -> None:
+    """
+    Background coroutine that transcribes audio locally with Parakeet, then
+    persists the result. Inference is CPU-bound, so it runs in a worker thread
+    and is gated by TRANSCRIBE_SEMAPHORE to avoid starving the event loop host.
+    """
+    logger.info(f"[transcribe-audio] Task {task_id}: waiting for transcription slot ({filename!r})")
+    async with TRANSCRIBE_SEMAPHORE:
+        logger.info(f"[transcribe-audio] Task {task_id}: acquired slot, transcribing {filename!r}")
+
+        status = "FAILURE"
+        message = "Unknown error"
+        result_data: dict = {"filename": filename}
+
+        try:
+            service = AudioTranscriberService()
+            t0 = time.perf_counter()
+            text, duration = await asyncio.to_thread(service.transcribe, audio_bytes, filename)
+            elapsed = round(time.perf_counter() - t0, 3)
+
+            result = TranscriptionResult(
+                filename=filename,
+                model=settings.TRANSCRIBE_MODEL,
+                duration_seconds=duration,
+                text=text,
+                processing_time_seconds=elapsed,
+            )
+            status = "SUCCESS"
+            message = (
+                f"Transcription complete – {duration}s of audio in {elapsed}s"
+                if text else
+                f"Transcription complete – no speech detected in {duration}s of audio"
+            )
+            result_data = result.model_dump()
+            logger.info(f"[transcribe-audio] Task {task_id}: completed successfully")
+
+        except Exception as exc:
+            message = f"Transcription error: {exc}"
+            logger.error(f"[transcribe-audio] Task {task_id}: failed – {exc}")
+
+        await _persist_task_record(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result_data=result_data,
+            task_type="transcribe",
+        )
+
+
+@router.post(
+    "/transcribe-audio/",
+    summary="Transcribe an audio file locally (Parakeet TDT 0.6B v3)",
+    tags=["Audio Transcription"],
+)
+async def create_transcription_task(
+    file: UploadFile = File(
+        ...,
+        description="Audio file (wav, mp3, m4a, ogg, opus, flac, webm, amr, …). Max AUDIO_MAX_FILE_SIZE_MB.",
+    ),
+    _rl: None = Depends(task_rate_limit),
+):
+    """
+    Enqueue a local speech-to-text job. Audio never leaves this server.
+
+    The file is decoded with PyAV, split into speech segments by Silero VAD,
+    and transcribed on CPU by NVIDIA Parakeet TDT 0.6B v3 (multilingual,
+    automatic language detection).
+
+    Returns a *task_id* that can be polled via **GET /transcribe-audio/{task_id}**.
+    Once `status` is `SUCCESS`, `result.text` holds the plain-text transcript.
+
+    **Errors:** `400` unsupported/undecodable/empty file, `413` file too large.
+    """
+    filename = file.filename or "upload"
+    max_bytes = AudioTranscriberService.max_bytes()
+
+    # ── 1. Reject oversize uploads before buffering them into memory ────────
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File too large: {file.size / 1024 / 1024:.1f} MB. "
+                f"Maximum allowed size is {settings.AUDIO_MAX_FILE_SIZE_MB} MB."
+            ),
+        )
+    audio_bytes = await file.read(max_bytes + 1)
+
+    # ── 2. Validate: extension, emptiness, size ───────────────────────────
+    try:
+        AudioTranscriberService.validate(audio_bytes, filename)
+    except ValueError as exc:
+        status_code = 413 if "too large" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+    # ── 3. Verify the content really is audio (header probe, no decode) ───
+    try:
+        await asyncio.to_thread(AudioTranscriberService.probe, audio_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # ── 4. Create task and hand off to a detached background coroutine ────
+    task_id = str(uuid.uuid4())
+    await _create_task_record(task_id=task_id, task_type="transcribe", status="IN_PROGRESS")
+    _spawn_background_task(_process_transcription_task(task_id, filename, audio_bytes))
+
+    logger.info(
+        f"[transcribe-audio] Task {task_id}: queued {filename!r} "
+        f"({len(audio_bytes) / 1024:.1f} KB)"
+    )
+    return {"task_id": task_id, "status": "IN_PROGRESS"}
+
+
+@router.get("/transcribe-audio/failed/", summary="List failed transcription tasks")
+async def get_failed_transcription_tasks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Return the most recently failed transcription tasks (most recent first).
+    """
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status == "FAILURE")
+        .where(TaskRecord.task_type == "transcribe")
+        .order_by(desc(TaskRecord.updated_at))
+        .limit(limit)
+    )
+    tasks = session.exec(statement).all()
+
+    results = []
+    for t in tasks:
+        filename = "Unknown"
+        if t.result_data and isinstance(t.result_data, dict):
+            filename = t.result_data.get("filename", "Unknown")
+
+        results.append({
+            "task_id": t.task_id,
+            "filename": filename,
+            "message": t.message,
+            "failed_at": t.updated_at,
+        })
+
+    return {"failed_tasks": results}
+
+
+@router.get("/transcribe-audio/{task_id}", summary="Get transcription task status")
+async def get_transcription_task_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+):
+    """
+    Poll the status and result of a transcription task by *task_id*.
+
+    Once `status` is `SUCCESS`, `result` contains `filename`, `model`,
+    `duration_seconds`, `text` and `processing_time_seconds`.
+    """
+    task = session.get(TaskRecord, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "message": task.message,
+        "result": task.result_data,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
